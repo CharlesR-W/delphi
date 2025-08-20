@@ -107,7 +107,9 @@ class Offline(Client):
             if self.statistics:
                 non_cached_tokens = len(
                     self.tokenizer.apply_chat_template(
-                        batch[-1:], add_generation_prompt=True, tokenize=True  # type: ignore
+                        batch[-1:],
+                        add_generation_prompt=True,
+                        tokenize=True,  # type: ignore
                     )
                 )
                 statistics.append(
@@ -136,7 +138,8 @@ class Offline(Client):
                 statistics[i].prompt = batches[i][-1]["content"]  # type: ignore
                 statistics[i].response = r.outputs[0].text
                 with open(
-                    f"statistics/{hash(batches[i][-1]['content'][-100:])}.json", "w"  # type: ignore
+                    f"statistics/{hash(batches[i][-1]['content'][-100:])}.json",
+                    "w",  # type: ignore
                 ) as f:
                     json.dump(statistics[i].__dict__, f, indent=4)
             new_response.append(
