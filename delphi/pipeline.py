@@ -96,7 +96,7 @@ class Pipeline:
         Initialize the Pipeline with a list of pipes.
 
         Args:
-            loader (Callable): The loader to be executed first.
+            loader (AsyncIterable | Callable): The loader to be executed first.
             *pipes (list[Pipe | Callable]): Pipes to be executed in the pipeline.
         """
 
@@ -154,15 +154,25 @@ class Pipeline:
         Raises:
             TypeError: If the first pipe is neither an async iterable nor a callable.
         """
-        if isinstance(self.loader, AsyncIterable):
-            async for item in self.loader:
+        if callable(self.loader):
+            result = self.loader()
+        else:
+            result = self.loader
+
+        if hasattr(result, "__aiter__"):
+            # Handle async generators
+            async for item in result:
                 yield item
-        elif callable(self.loader):
-            for item in self.loader():
+        elif hasattr(result, "__iter__"):
+            # Handle regular iterables
+            for item in result:
                 yield item
                 await asyncio.sleep(0)  # Allow other coroutines to run
         else:
-            raise TypeError("The first pipe must be an async iterable or a callable")
+            raise TypeError(
+                "The first pipe must be an async iterable or a \
+                callable that returns an async iterable"
+            )
 
     async def process_item(self, item: Any, semaphore: asyncio.Semaphore) -> Any:
         """

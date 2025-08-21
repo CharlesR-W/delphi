@@ -17,6 +17,8 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 
+from crw_best_of_k_explainer import BestOfKExplainer, BestOfKExplainerScorer
+
 # Import the new classes from crw_cls_overwrites.py
 from crw_cls_overwrites import (
     ExplainerConfig,
@@ -147,9 +149,11 @@ async def process_cache(
         neighbours_path=str(neighbours_path),
     )
 
-    # Create integrated explainer
-    integrated_explainer = IntegratedExplainerScorer(
-        integrated_explainer_scorer_cfg=run_cfg.integrated_explainer_scorer_cfg,
+    # Create integrated explainer-scorer
+    integrated_explainer = (
+        run_cfg.integrated_explainer_scorer_cfg.integrated_explainer_scorer_cls(
+            integrated_explainer_scorer_cfg=run_cfg.integrated_explainer_scorer_cfg,
+        )
     )
 
     # Process all records using the integrated explainer
@@ -364,7 +368,7 @@ if __name__ == "__main__":
 
     print("Creating run config")
     VERBOSE = True
-    EXPLAINER_CLS = DefaultExplainer
+    EXPLAINER_CLS = DefaultExplainer  # BestOfKExplainer
     SCORER_CLSs = [DetectionScorer, FuzzingScorer]
     NUM_EXAMPLES_PER_SCORER_PROMPT = 5
     NAME = "pythia-70m-smoketest"
@@ -376,6 +380,14 @@ if __name__ == "__main__":
     HOOKPOINTS = ["layers.5"]
     MAX_LATENTS = 10
 
+    if EXPLAINER_CLS == BestOfKExplainer:
+        INTEGRATED_EXPLAINER_SCORER_CLS = BestOfKExplainerScorer
+        EXPLAINER_KWARGS = {"num_explanations": 3, "is_one_shot": True}
+    else:
+        INTEGRATED_EXPLAINER_SCORER_CLS = IntegratedExplainerScorer
+        EXPLAINER_KWARGS = {}
+
+    # typically not changed
     FILTER_BOS = True
     OVERWRITE = ["scores"]
     EXPLAINER_HIGHLIGHT_THRESHOLD = 0.3
@@ -407,6 +419,7 @@ if __name__ == "__main__":
         verbose=VERBOSE,
         temperature=EXPLAINER_TEMPERATURE,
         explanations_path=explanations_path,
+        explainer_kwargs=EXPLAINER_KWARGS,
     )
 
     # Scorer configs
@@ -428,6 +441,7 @@ if __name__ == "__main__":
         client_cfg=client_cfg,
         explainer_cfg=explainer_cfg,
         scorer_cfgs=scorer_cfgs,
+        integrated_explainer_scorer_cls=INTEGRATED_EXPLAINER_SCORER_CLS,
     )
 
     run_cfg = MyRunConfig(

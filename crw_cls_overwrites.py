@@ -30,6 +30,7 @@ class ExplainerConfig(BaseModel):
     verbose: bool = True
     temperature: float = 0.0
     explanations_path: Path
+    explainer_kwargs: dict = {}
 
 
 class ScorerConfig(BaseModel):
@@ -45,6 +46,7 @@ class IntegratedExplainerScorerConfig(BaseModel):
     client_cfg: OfflineClientConfig
     explainer_cfg: ExplainerConfig
     scorer_cfgs: list[ScorerConfig]
+    integrated_explainer_scorer_cls: type
 
 
 def instantiate_scorer(scorer_cfg: ScorerConfig, client) -> Scorer:
@@ -63,6 +65,7 @@ def instantiate_explainer(explainer_cfg: ExplainerConfig, client) -> Explainer:
         threshold=explainer_cfg.highlight_threshold,
         verbose=explainer_cfg.verbose,
         temperature=explainer_cfg.temperature,
+        **explainer_cfg.explainer_kwargs,
     )
 
 
