@@ -34,7 +34,6 @@ from delphi.config import (
     RunConfig,
     SamplerConfig,
 )
-from delphi.explainers import DefaultExplainer
 from delphi.latents import LatentCache, LatentDataset  # , LatentRecord
 from delphi.latents.neighbours import NeighbourCalculator
 from delphi.log.result_analysis import log_results
@@ -368,7 +367,7 @@ if __name__ == "__main__":
 
     print("Creating run config")
     VERBOSE = True
-    EXPLAINER_CLS = DefaultExplainer  # BestOfKExplainer
+    EXPLAINER_CLS = BestOfKExplainer  # DefaultExplainer
     SCORER_CLSs = [DetectionScorer, FuzzingScorer]
     NUM_EXAMPLES_PER_SCORER_PROMPT = 5
     NAME = "pythia-70m-smoketest"

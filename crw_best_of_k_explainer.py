@@ -1,10 +1,13 @@
 import re
 from typing import AsyncIterable, Callable, List
 
+import orjson
+
 from crw_cls_overwrites import IntegratedExplainerScorer
 from delphi import logger
+from delphi.explainers.default.default import DefaultExplainer
 from delphi.explainers.default.prompts import SYSTEM_BEST_OF_K_ONESHOT
-from delphi.explainers.explainer import Explainer, ExplainerResult
+from delphi.explainers.explainer import ExplainerResult
 from delphi.latents.latents import ActivatingExample, LatentRecord, NonActivatingExample
 
 
@@ -13,6 +16,19 @@ class BestOfKExplainerScorer(IntegratedExplainerScorer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+    def explainer_postprocess(
+        self,
+        result: list[ExplainerResult],
+    ) -> list[ExplainerResult]:
+        assert isinstance(result, list)
+
+        path = self.integrated_explainer_scorer_cfg.explainer_cfg.explanations_path
+        for expl_result in result:
+            file_path = path / f"{expl_result.record.latent}.txt"
+            with open(file_path, "ab") as f:
+                f.write(orjson.dumps(expl_result.explanation))
+        return result
 
     async def __call__(self, source: AsyncIterable | Callable) -> None:
         """Run explainer → scorers as a single pipeline.
@@ -44,9 +60,14 @@ class BestOfKExplainerScorer(IntegratedExplainerScorer):
         return await scorer_pl.run()
 
 
-class BestOfKExplainer(Explainer):
+class BestOfKExplainer(DefaultExplainer):
     num_explanations: int = 3
     is_one_shot: bool = True  # if False: run K independent requests/contexts
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_explanations = self.generation_kwargs.get("num_explanations", 3)
+        self.is_one_shot = self.generation_kwargs.get("is_one_shot", True)
 
     async def __call__(self, record: LatentRecord) -> list[ExplainerResult]:
         """Return K candidate explanations (one-shot or K independent calls)."""
@@ -85,7 +106,7 @@ class BestOfKExplainer(Explainer):
 
         return results
 
-    def _build_prompt(  # type: ignore
+    def _build_prompt(  # type: ignore; mostly copied from DefaultExplainer
         self, examples: list[ActivatingExample | NonActivatingExample]
     ) -> list[dict]:
         """Build a prompt labeling activating vs non-activating examples."""

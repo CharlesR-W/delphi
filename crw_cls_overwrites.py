@@ -7,9 +7,9 @@ from pydantic import BaseModel, PrivateAttr
 
 from delphi.clients.offline import Offline
 from delphi.config import CacheConfig, ConstructorConfig, SamplerConfig
+from delphi.latents.latents import LatentRecord
 from delphi.explainers.default.default import DefaultExplainer
 from delphi.explainers.explainer import Explainer, ExplainerResult
-from delphi.latents.latents import LatentRecord
 from delphi.pipeline import Pipe, Pipeline, process_wrapper
 from delphi.scorers.scorer import Scorer, ScorerResult
 
@@ -65,7 +65,7 @@ def instantiate_explainer(explainer_cfg: ExplainerConfig, client) -> Explainer:
         threshold=explainer_cfg.highlight_threshold,
         verbose=explainer_cfg.verbose,
         temperature=explainer_cfg.temperature,
-        **explainer_cfg.explainer_kwargs,
+        generation_kwargs=explainer_cfg.explainer_kwargs,
     )
 
 
@@ -107,30 +107,52 @@ class IntegratedExplainerScorer(BaseModel):
         self._explainer_pipeline = self._form_explainer_partial_pipeline()
         self._scorer_pipeline = self._form_scorer_partial_pipeline()
 
+    def scorer_preprocess(
+        self,
+        result: ExplainerResult,
+    ) -> LatentRecord:
+        record = result.record
+        record.explanation = result.explanation
+        return record
+
+    def explainer_preprocess(
+        self,
+        result: ExplainerResult,
+    ) -> ExplainerResult:
+        return result
+
+    def explainer_postprocess(
+        self,
+        result: ExplainerResult,
+    ) -> ExplainerResult:
+        path = self.integrated_explainer_scorer_cfg.explainer_cfg.explanations_path
+        file_path = path / f"{result.record.latent}.txt"
+        with open(file_path, "ab") as f:
+            f.write(orjson.dumps(result.explanation))
+        return result
+
+    def scorer_postprocess(
+        self,
+        result: ScorerResult,
+        score_dir: Path,
+    ) -> ScorerResult:
+        safe = str(result.record.latent).replace("/", "--")
+        with open(score_dir / f"{safe}.txt", "wb") as f:
+            f.write(orjson.dumps(result.score))
+        return result
+
     def _form_explainer_partial_pipeline(
         self,
     ) -> Callable[[AsyncIterable | Callable], Pipeline]:
-        def explainer_postprocess(result: ExplainerResult) -> ExplainerResult:
-            with open(
-                self.integrated_explainer_scorer_cfg.explainer_cfg.explanations_path
-                / f"{result.record.latent}.txt",
-                "wb",
-            ) as f:
-                f.write(orjson.dumps({"explanation": result.explanation}))
-            return result
-
-        def explainer_preprocess(result: ExplainerResult) -> ExplainerResult:
-            return result
-
         wrapped = process_wrapper(
             self._explainer,
-            preprocess=explainer_preprocess,
-            postprocess=explainer_postprocess,
+            preprocess=self.explainer_preprocess,
+            postprocess=self.explainer_postprocess,
         )
 
         # Create a function that takes a source and creates
         #  a Pipeline with source as loader and wrapped as pipe
-        def create_pipeline(source):
+        def create_pipeline(source: AsyncIterable | Callable) -> Pipeline:
             return Pipeline(source, wrapped)
 
         return create_pipeline
@@ -138,22 +160,12 @@ class IntegratedExplainerScorer(BaseModel):
     def _form_scorer_partial_pipeline(
         self,
     ) -> Callable[[AsyncIterable | Callable], Pipeline]:
-        def scorer_preprocess(result: ExplainerResult) -> LatentRecord:
-            record = result.record
-            record.explanation = result.explanation
-            return record
-
-        def scorer_postprocess(result: ScorerResult, score_dir: Path) -> None:
-            safe = str(result.record.latent).replace("/", "--")
-            with open(score_dir / f"{safe}.txt", "wb") as f:
-                f.write(orjson.dumps(result.score))
-
         wrapped = [
             process_wrapper(
                 scorer,
-                preprocess=scorer_preprocess,
+                preprocess=self.scorer_preprocess,
                 postprocess=partial(
-                    scorer_postprocess,
+                    self.scorer_postprocess,
                     score_dir=self.integrated_explainer_scorer_cfg.scorer_cfgs[
                         i
                     ].scores_path,
@@ -165,7 +177,7 @@ class IntegratedExplainerScorer(BaseModel):
         #  a function that creates a Pipeline
         scorer_pipe = Pipe(*wrapped)
 
-        def create_pipeline(source):
+        def create_pipeline(source: AsyncIterable | Callable) -> Pipeline:
             return Pipeline(source, scorer_pipe)
 
         return create_pipeline
