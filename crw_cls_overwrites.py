@@ -173,24 +173,19 @@ class IntegratedExplainerScorer(BaseModel):
         # Run it to get results
         explainer_results = await explainer_pl.run()
 
-        # Create a proper async iterable from the results
-        class ResultsAsyncIterable:
-            def __init__(self, results):
-                self.results = results
-                self.index = 0
+        # note: the pipeline always returns a list of
+        # all the results, so explainer_results looks like
+        # [ExplainerResult, ExplainerResult, ...]
 
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                if self.index >= len(self.results):
-                    raise StopAsyncIteration
-                result = self.results[self.index]
-                self.index += 1
-                return result
+        # Create async iterable from results
+        # necessary to pass to scorer pipeline -
+        # it can't take just a list.
+        async def results_iter():
+            for result in explainer_results:
+                yield result
 
         # Create the scorer pipeline with the results as source
-        scorer_pl = self._scorer_pipeline(ResultsAsyncIterable(explainer_results))
+        scorer_pl = self._scorer_pipeline(results_iter)
         return await scorer_pl.run()
 
 
