@@ -1,7 +1,8 @@
 import asyncio
 from dataclasses import dataclass
 
-from ..explainer import ActivatingExample, Explainer
+from ...latents.latents import LatentRecord
+from ..explainer import Explainer
 from .prompt_builder import build_prompt
 
 
@@ -12,7 +13,8 @@ class DefaultExplainer(Explainer):
     cot: bool = False
     """Whether to use chain of thought reasoning."""
 
-    def _build_prompt(self, examples: list[ActivatingExample]) -> list[dict]:
+    def _build_prompt(self, record: LatentRecord) -> list[dict]:
+        examples = record.train
         highlighted_examples = []
 
         for i, example in enumerate(examples):
