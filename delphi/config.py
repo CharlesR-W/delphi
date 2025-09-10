@@ -215,3 +215,8 @@ class RunConfig(Serializable):
 
     """List of run stages to recompute. This is a debugging tool
     and may be removed in the future."""
+
+    server_port: int | None = field(
+        default=None,
+    )
+    """Port to use for the vLLM server."""

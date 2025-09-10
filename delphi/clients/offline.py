@@ -1,3 +1,4 @@
+
 import asyncio
 import json
 from dataclasses import dataclass
@@ -5,6 +6,8 @@ from functools import partial
 from pathlib import Path
 from typing import Union
 
+from openai import AsyncOpenAI
+from openai.types.chat.chat_completion import ChatCompletion
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (
@@ -50,6 +53,7 @@ class Offline(Client):
         num_gpus: int = 2,
         enforce_eager: bool = False,
         statistics: bool = False,
+        server_port: int|None = None,
     ):
         """Client for offline generation. Models not already present in the on-disk
         HuggingFace cache will be downloaded. Note that temperature must be increased
@@ -59,18 +63,23 @@ class Offline(Client):
         self.model = model
         self.queue = asyncio.Queue()
         self.task = None
-        self.client = LLM(
-            model=model,
-            gpu_memory_utilization=max_memory,
-            enable_prefix_caching=prefix_caching,
-            tensor_parallel_size=num_gpus,
-            max_model_len=max_model_len,
-            enforce_eager=enforce_eager,
-        )
+        if server_port is None:
+            self.client = LLM(
+                model=model,
+                gpu_memory_utilization=max_memory,
+                enable_prefix_caching=prefix_caching,
+                tensor_parallel_size=num_gpus,
+                max_model_len=max_model_len,
+                enforce_eager=enforce_eager,
+            )
+            
+        else:
+            self.base_url = f"http://localhost:{server_port}/v1"
+            self.client = AsyncOpenAI(base_url=self.base_url, api_key="EMPTY")
         self.sampling_params = SamplingParams(max_tokens=number_tokens_to_generate)
         self.tokenizer = AutoTokenizer.from_pretrained(model)
         self.batch_size = batch_size
-        self.statistics = statistics
+        self.statistics = statistics 
 
         if self.statistics:
             self.statistics_path = Path("statistics")
@@ -117,35 +126,71 @@ class Offline(Client):
                         num_generated_tokens=0,
                     )
                 )
-        response = await loop.run_in_executor(
-            None,
-            partial(
-                self.client.generate,  # type: ignore
-                prompt_token_ids=prompts,
-                sampling_params=self.sampling_params,
-                use_tqdm=False,
-            ),
-        )
+        if isinstance(self.client, LLM):
+            responses = await loop.run_in_executor(
+                None,
+                partial(
+                    self.client.generate,  # type: ignore
+                    prompt_token_ids=prompts,
+                    sampling_params=self.sampling_params,
+                    use_tqdm=False,
+                ),
+            )
+        else: # OpenAI server
+            tasks = [
+                self.client.chat.completions.create(
+                    model=self.model,
+                    messages=batch,
+                    temperature=getattr(self.sampling_params, "temperature", 0.7),
+                    max_tokens=getattr(self.sampling_params, "max_tokens", 500),
+                    extra_body={
+                        "logprobs": bool(getattr(self.sampling_params, "logprobs", True)),
+                        "prompt_logprobs": bool(getattr(self.sampling_params, "prompt_logprobs", False)),
+                    } if getattr(self.sampling_params, "logprobs", None) or getattr(self.sampling_params, "prompt_logprobs", None) else None,
+                )
+                for batch in batches
+            ]
+            responses: list[ChatCompletion] = await asyncio.gather(*tasks)
 
         new_response = []
-        for i, r in enumerate(response):
-            logprobs, prompt_logprobs = self._parse_logprobs(r)
-            if self.statistics:
-                statistics[i].num_generated_tokens = len(r.outputs[0].token_ids)
-                # save the statistics to a file, name is a hash of the prompt
-                statistics[i].prompt = batches[i][-1]["content"]  # type: ignore
-                statistics[i].response = r.outputs[0].text
-                with open(
-                    f"statistics/{hash(batches[i][-1]['content'][-100:])}.json", "w"  # type: ignore
-                ) as f:
-                    json.dump(statistics[i].__dict__, f, indent=4)
-            new_response.append(
-                Response(
-                    text=r.outputs[0].text,
-                    logprobs=logprobs,
-                    prompt_logprobs=prompt_logprobs,
+        if isinstance(self.client, LLM): # vLLM
+            for i, r in enumerate(responses):
+                logprobs, prompt_logprobs = self._parse_logprobs(r)
+                if self.statistics:
+                    statistics[i].num_generated_tokens = len(r.outputs[0].token_ids)
+                    # save the statistics to a file, name is a hash of the prompt
+                    statistics[i].prompt = batches[i][-1]["content"]  # type: ignore
+                    statistics[i].response = r.outputs[0].text
+                    with open(
+                        f"statistics/{hash(batches[i][-1]['content'][-100:])}.json", "w"  # type: ignore
+                    ) as f:
+                        json.dump(statistics[i].__dict__, f, indent=4)
+                new_response.append(
+                    Response(
+                        text=r.outputs[0].text,
+                        logprobs=logprobs,
+                        prompt_logprobs=prompt_logprobs,
+                    )
                 )
-            )
+        else: # OpenAI server
+            for i, r in enumerate(responses):
+                text = r.choices[0].message.content # type: ignore
+                logprobs, prompt_logprobs = self._parse_logprobs(r)
+                if self.statistics:
+                    statistics[i].num_generated_tokens = len(text)  # Approximate
+                    statistics[i].prompt = batches[i][-1]["content"]  # type: ignore
+                    statistics[i].response = text
+                    with open(
+                        f"statistics/{hash(batches[i][-1]['content'][-100:])}.json", "w"  # type: ignore
+                    ) as f:
+                        json.dump(statistics[i].__dict__, f, indent=4)
+                new_response.append(
+                    Response(
+                        text=text,
+                        logprobs=logprobs,
+                        prompt_logprobs=prompt_logprobs,
+                    )
+                )
         return new_response
 
     async def generate(
@@ -161,12 +206,21 @@ class Offline(Client):
         return await future
 
     def _parse_logprobs(self, response):
-        response_tokens = response.outputs[0].token_ids
-        logprobs = response.outputs[0].logprobs
-        prompt_logprobs = response.prompt_logprobs
+        if isinstance(response, ChatCompletion): # OpenAI server
+            response_tokens = response.choices[0].message.content
+            logprobs = getattr(response.choices[0], "logprobs", None)
+            prompt_logprobs = getattr(response.choices[0], "prompt_logprobs", None)
+        else:
+            # vLLM
+            response_tokens = response.outputs[0].token_ids
+            logprobs = getattr(response.outputs[0], "logprobs", None)
+            prompt_logprobs = getattr(response.outputs[0], "prompt_logprobs", None)
+        
         if logprobs is None and prompt_logprobs is None:
             return None, None
+        
         logprobs_list = None
+        
         if logprobs is not None:
             logprobs_list = []
             for i in range(len(logprobs)):
