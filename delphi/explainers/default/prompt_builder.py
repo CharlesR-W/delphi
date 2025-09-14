@@ -1,4 +1,4 @@
-from .prompts import example, system, system_single_token
+from .prompts import example, system, system_single_token, SYSTEM
 
 
 def build_examples(
@@ -29,9 +29,11 @@ def build_prompt(
     examples: str,
     activations: bool = False,
     cot: bool = False,
+    system_prompt: str = SYSTEM,
 ) -> list[dict]:
     messages = system(
         cot=cot,
+        system_prompt=system_prompt,
     )
 
     few_shot_examples = build_examples(
@@ -55,8 +57,11 @@ def build_prompt(
 
 def build_single_token_prompt(
     examples,
+    system_prompt: str = SYSTEM,
 ):
-    messages = system_single_token()
+    messages = system_single_token(
+        system_prompt=system_prompt,
+    )
 
     user_start = f"WORDS: {examples}"
 

@@ -53,6 +53,7 @@ class Classifier(Scorer):
         self.rng.shuffle(samples)
 
         batched_samples = self._batch(samples)
+        #if record.explanation is not None:
         results = await self._query(
             record.explanation,
             batched_samples,

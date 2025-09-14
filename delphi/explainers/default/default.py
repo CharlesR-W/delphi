@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 from ...latents.latents import LatentRecord
 from ..explainer import Explainer
+from .prompts import SYSTEM
 from .prompt_builder import build_prompt
 
 
@@ -13,7 +14,7 @@ class DefaultExplainer(Explainer):
     cot: bool = False
     """Whether to use chain of thought reasoning."""
 
-    def _build_prompt(self, record: LatentRecord) -> list[dict]:
+    def _build_prompt(self, record: LatentRecord, system_prompt: str = SYSTEM) -> list[dict]:
         examples = record.train
         highlighted_examples = []
 
@@ -39,6 +40,7 @@ class DefaultExplainer(Explainer):
             examples=highlighted_examples,
             activations=self.activations,
             cot=self.cot,
+            system_prompt=SYSTEM,
         )
 
     def call_sync(self, record):

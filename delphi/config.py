@@ -141,7 +141,7 @@ class RunConfig(Serializable):
     models and 'openrouter' for API calls."""
 
     explainer: str = field(
-        choices=["default", "none"],
+        choices=["default", "none", "bestofk", "iterative"],
         default="default",
     )
     """Explainer to use for generating explanations. Options are 'default' for
@@ -160,6 +160,12 @@ class RunConfig(Serializable):
     )
     """Scorer methods to score latent explanations. Options are 'fuzz', 'detection', and
     'simulation'."""
+
+    # Number of explanations to generate when using the BestOfK explainer
+    bestofk_num_explanations: int = 3
+
+    # Number of iterative refinement rounds when using the Iterative explainer
+    iterative_num_rounds: int = 3
 
     name: str = ""
     """The name of the run. Results are saved in a directory with this name."""
@@ -220,3 +226,19 @@ class RunConfig(Serializable):
         default=None,
     )
     """Port to use for the vLLM server."""
+
+    # Iterative-specific configuration
+    iterative_num_rounds: int = field(default=3)
+    """Number of iterative refinement rounds for the iterative explainer."""
+
+    iterative_holdout_ratio_of_total: float = field(default=0.1)
+    """Ratio of total available test/non-activating examples to hold out for final evaluation."""
+
+    iterative_test_ratio_of_total: float = field(default=0.1)
+    """Ratio of total available test/non-activating examples to use as the test set per round."""
+
+    iterative_max_num_false_positives: int = field(default=20)
+    """Maximum number of false positive extra examples to include when refining prompts."""
+
+    iterative_max_num_false_negatives: int = field(default=20)
+    """Maximum number of false negative extra examples to include when refining prompts."""

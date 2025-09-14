@@ -1,5 +1,6 @@
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import orjson
 import pandas as pd
@@ -10,7 +11,11 @@ from sklearn.metrics import roc_auc_score, roc_curve
 
 
 def plot_firing_vs_f1(
-    latent_df: pd.DataFrame, num_tokens: int, out_dir: Path, run_label: str
+    latent_df: pd.DataFrame,
+    num_tokens: int,
+    out_dir: Path,
+    run_label: str,
+    image_format: str = "pdf",
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for module, module_df in latent_df.groupby("module"):
@@ -20,7 +25,7 @@ def plot_firing_vs_f1(
         fig.update_layout(
             xaxis_title="Firing rate", yaxis_title="F1 score", xaxis_range=[-5.4, 0]
         )
-        fig.write_image(out_dir / f"{run_label}_{module}_firing_rates.pdf")
+        fig.write_image(out_dir / f"{run_label}_{module}_firing_rates.{image_format}")
 
 
 def import_plotly():
@@ -47,7 +52,7 @@ def compute_auc(df: pd.DataFrame) -> float | None:
     return roc_auc_score(valid_df.activating, valid_df.probability)  # type: ignore
 
 
-def plot_accuracy_hist(df: pd.DataFrame, out_dir: Path):
+def plot_accuracy_hist(df: pd.DataFrame, out_dir: Path, image_format: str = "pdf"):
     out_dir.mkdir(exist_ok=True, parents=True)
     for label in df["score_type"].unique():
         fig = px.histogram(
@@ -56,10 +61,10 @@ def plot_accuracy_hist(df: pd.DataFrame, out_dir: Path):
             nbins=100,
             title=f"Accuracy distribution: {label}",
         )
-        fig.write_image(out_dir / f"{label}_accuracy.pdf")
+        fig.write_image(out_dir / f"{label}_accuracy.{image_format}")
 
 
-def plot_roc_curve(df: pd.DataFrame, out_dir: Path):
+def plot_roc_curve(df: pd.DataFrame, out_dir: Path, image_format: str = "pdf"):
     if not df.probability.nunique():
         return
 
@@ -80,7 +85,7 @@ def plot_roc_curve(df: pd.DataFrame, out_dir: Path):
         yaxis_title="TPR",
     )
     out_dir.mkdir(exist_ok=True, parents=True)
-    fig.write_image(out_dir / "roc_curve.pdf")
+    fig.write_image(out_dir / f"roc_curve.{image_format}")
 
 
 def compute_confusion(df: pd.DataFrame, threshold: float = 0.5) -> dict:
@@ -284,8 +289,248 @@ def add_latent_f1(latent_df: pd.DataFrame) -> pd.DataFrame:
     return latent_df.merge(f1s, on=["module", "latent_idx"])
 
 
+# ----------------------
+# Round-wise explanation analysis (Best-of-K, Iterative)
+# ----------------------
+
+
+def _parse_multi_score_filename(stem: str) -> tuple[str, int, int]:
+    """Parse multi-score filename stem into (module, latent_idx, round_idx).
+
+    Expected pattern: "<module>_latent<idx>_<round>"
+    Example: "layers.5_latent0_2" -> ("layers.5", 0, 2)
+    """
+    match = re.match(r"(.+)_latent(\d+)_([0-9]+)$", stem)
+    if not match:
+        raise ValueError(f"Unexpected multi_scores filename pattern: {stem}")
+    module = match.group(1)
+    latent_idx = int(match.group(2))
+    round_idx = int(match.group(3))
+    return module, latent_idx, round_idx
+
+
+def load_explanation_scores_per_round(scores_path: Path) -> pd.DataFrame:
+    """Load per-explanation (per-round) scores from scores/*/multi_scores.
+
+    Returns a DataFrame with columns:
+    - module, latent_idx, round, scorer, f1_score, accuracy, precision, recall
+    """
+    rows = []
+    for scorer_dir in scores_path.iterdir():
+        if not scorer_dir.is_dir():
+            continue
+        multi_dir = scorer_dir / "multi_scores"
+        if not multi_dir.exists():
+            # Not all explainers persist multi_scores (e.g., iterative in some runs)
+            continue
+        for file in multi_dir.glob("*.txt"):
+            try:
+                module, latent_idx, round_idx = _parse_multi_score_filename(file.stem)
+            except ValueError:
+                continue
+
+            df = load_single_score_file(file)
+            if df.empty:
+                continue
+            conf = compute_confusion(df)
+            metrics = compute_classification_metrics(conf)
+            rows.append(
+                {
+                    "module": module,
+                    "latent_idx": latent_idx,
+                    "round": round_idx,
+                    "scorer": scorer_dir.name,
+                    **metrics,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def load_single_score_file(path: Path) -> pd.DataFrame:
+    """Helper to load a single score file to sample-level DataFrame.
+
+    Matches the structure produced by scorer_postprocess (list of dicts per sample).
+    """
+    try:
+        data = orjson.loads(path.read_bytes())
+    except orjson.JSONDecodeError:
+        print(f"Error decoding JSON from {path}. Skipping file.")
+        return pd.DataFrame()
+
+    return pd.DataFrame(
+        [
+            {
+                "text": "".join(ex.get("str_tokens", [])),
+                "activating": ex.get("activating"),
+                "prediction": ex.get("prediction"),
+                "probability": ex.get("probability"),
+                "correct": ex.get("correct"),
+            }
+            for ex in data
+        ]
+    )
+
+
+def plot_round_box_and_bar(
+    round_df: pd.DataFrame,
+    out_dir: Path,
+    run_label: str,
+    image_format: str = "pdf",
+    metric: str = "f1_score",
+) -> None:
+    """Create box (whisker) and mean-with-error bar plots for a metric per round.
+
+    Expects round_df with columns: round, scorer, and the metric (e.g., f1_score).
+    """
+    if round_df.empty:
+        print("No per-round scores found (multi_scores missing). Skipping plots.")
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for scorer, sdf in round_df.groupby("scorer"):
+        # Box (whisker) plot per round
+        fig_box = px.box(
+            sdf,
+            x="round",
+            y=metric,
+            points=False,
+            title=f"{run_label} - {scorer} - {metric} per round",
+        )
+        fig_box.update_layout(xaxis_title="Round", yaxis_title=metric)
+        fig_box.write_image(
+            out_dir / f"{run_label}_{scorer}_{metric}_per_round_box.{image_format}"
+        )
+
+        # Bar with whiskers (mean ± std) per round
+        agg = (
+            sdf.groupby("round")[metric]
+            .agg(["mean", "std"])
+            .reset_index()
+            .rename(columns={"mean": metric})
+        )
+        fig_bar = px.bar(
+            agg,
+            x="round",
+            y=metric,
+            title=f"{run_label} - {scorer} - mean {metric} per round",
+            error_y="std",
+        )
+        fig_bar.update_layout(xaxis_title="Round", yaxis_title=f"mean {metric}")
+        fig_bar.write_image(
+            out_dir / f"{run_label}_{scorer}_{metric}_per_round_bar.{image_format}"
+        )
+
+
+def plot_best_so_far_box_and_bar(
+    round_df: pd.DataFrame,
+    out_dir: Path,
+    run_label: str,
+    image_format: str = "pdf",
+    metric: str = "f1_score",
+) -> None:
+    """Box and bar plots for the best-so-far metric at each round.
+
+    For each (module, latent_idx), compute best metric up to and including round r,
+    then plot distribution across latents for each r.
+    """
+    if round_df.empty:
+        print("No per-round scores found (multi_scores missing). Skipping plots.")
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    best_rows = []
+    for scorer, sdf in round_df.groupby("scorer"):
+        rounds = sorted(sdf["round"].unique())
+        for (module, latent_idx), g in sdf.groupby(["module", "latent_idx"]):
+            g_sorted = g.sort_values("round")
+            best_val = None
+            best_map = {}
+            for r in rounds:
+                sub = g_sorted[g_sorted["round"] <= r]
+                if sub.empty:
+                    continue
+                current_best = sub[metric].max()
+                best_map[r] = (
+                    current_best if best_val is None else max(best_val, current_best)
+                )
+                best_val = best_map[r]
+            for r, val in best_map.items():
+                best_rows.append(
+                    {
+                        "module": module,
+                        "latent_idx": latent_idx,
+                        "round": r,
+                        "scorer": scorer,
+                        metric: val,
+                    }
+                )
+
+    best_df = pd.DataFrame(best_rows)
+    if best_df.empty:
+        print("No best-so-far data computed. Skipping plots.")
+        return
+
+    for scorer, sdf in best_df.groupby("scorer"):
+        fig_box = px.box(
+            sdf,
+            x="round",
+            y=metric,
+            points=False,
+            title=f"{run_label} - {scorer} - best-so-far {metric} per round",
+        )
+        fig_box.update_layout(xaxis_title="Round", yaxis_title=metric)
+        fig_box.write_image(
+            out_dir / f"{run_label}_{scorer}_bestsofar_{metric}_box.{image_format}"
+        )
+
+        agg = (
+            sdf.groupby("round")[metric]
+            .agg(["mean", "std"])
+            .reset_index()
+            .rename(columns={"mean": metric})
+        )
+        fig_bar = px.bar(
+            agg,
+            x="round",
+            y=metric,
+            title=f"{run_label} - {scorer} - best-so-far mean {metric} per round",
+            error_y="std",
+        )
+        fig_bar.update_layout(xaxis_title="Round", yaxis_title=f"mean {metric}")
+        fig_bar.write_image(
+            out_dir / f"{run_label}_{scorer}_bestsofar_{metric}_bar.{image_format}"
+        )
+
+
+def analyze_explainer_rounds(
+    scores_path: Path,
+    out_dir: Path,
+    run_label: Optional[str] = None,
+    image_format: str = "pdf",
+    metric: str = "f1_score",
+) -> None:
+    """Convenience wrapper: load per-round scores and emit both plots.
+
+    This expects per-explanation scores saved under scores/*/multi_scores as JSON
+    (the format produced when best-of-k writes multi_scores). For iterative runs,
+    ensure per-round scores are persisted similarly to enable these plots.
+    """
+    if run_label is None:
+        run_label = scores_path.name
+    round_df = load_explanation_scores_per_round(scores_path)
+    plot_round_box_and_bar(round_df, out_dir, run_label, image_format, metric)
+    plot_best_so_far_box_and_bar(round_df, out_dir, run_label, image_format, metric)
+
+
 def log_results(
-    scores_path: Path, viz_path: Path, modules: list[str], scorer_names: list[str]
+    scores_path: Path,
+    viz_path: Path,
+    modules: list[str],
+    scorer_names: list[str],
+    image_formats: list[Literal["png", "pdf"]] = ["pdf"],
 ):
     import_plotly()
 
@@ -293,9 +538,14 @@ def log_results(
     latent_df = latent_df[latent_df["score_type"].isin(scorer_names)]
     latent_df = add_latent_f1(latent_df)
 
-    plot_firing_vs_f1(
-        latent_df, num_tokens=10_000_000, out_dir=viz_path, run_label=scores_path.name
-    )
+    for image_format in image_formats:
+        plot_firing_vs_f1(
+            latent_df,
+            num_tokens=10_000_000,
+            out_dir=viz_path,
+            run_label=scores_path.name,
+            image_format=image_format,
+        )
 
     if latent_df.empty:
         print("No data found")
@@ -320,12 +570,22 @@ def log_results(
             f"Number of features below the interpretation firing"
             f" count threshold: {uninterpretable_features}"
         )
-
-    plot_roc_curve(latent_df, viz_path)
+    for image_format in image_formats:
+        plot_roc_curve(latent_df, viz_path, image_format=image_format)
 
     processed_df = get_agg_metrics(latent_df, counts)
 
-    plot_accuracy_hist(processed_df, viz_path)
+    # Plot per-latent accuracy distributions rather than aggregated single-row metrics
+    latent_acc_df = (
+        latent_df.groupby(["score_type", "module", "latent_idx"])[  # per latent
+            "correct"
+        ]
+        .mean()
+        .reset_index()
+        .rename(columns={"correct": "accuracy"})
+    )
+    for image_format in image_formats:
+        plot_accuracy_hist(latent_acc_df, viz_path, image_format=image_format)
 
     for score_type in processed_df.score_type.unique():
         score_type_summary = processed_df[processed_df.score_type == score_type].iloc[0]
@@ -348,10 +608,8 @@ def log_results(
         fractions_failed = [
             score_type_summary["failed_count"]
             / (
-                (
-                    score_type_summary["total_examples"]
-                    + score_type_summary["failed_count"]
-                )
+                score_type_summary["total_examples"]
+                + score_type_summary["failed_count"]
             )
         ]
         print(
@@ -378,6 +636,24 @@ def log_results(
         )
 
         print("\nClass Distribution:")
-        print(f"""Positives: {score_type_summary['total_positives'].sum():.0f}""")
-        print(f"""Negatives: {score_type_summary['total_negatives'].sum():.0f}""")
+        print(f"""Positives: {score_type_summary["total_positives"].sum():.0f}""")
+        print(f"""Negatives: {score_type_summary["total_negatives"].sum():.0f}""")
         print(f"Total: {score_type_summary['total_examples'].sum():.0f}")
+
+    # Additionally, for best-of-k or iterative explainers, generate per-round plots
+    try:
+        with open(scores_path.parent / "run_config.json", "r") as f:
+            run_cfg = orjson.loads(f.read())
+        explainer_name = run_cfg.get("explainer", "")
+    except Exception:
+        explainer_name = ""
+
+    if explainer_name in ("bestofk", "iterative"):
+        for image_format in image_formats:
+            analyze_explainer_rounds(
+                scores_path,
+                viz_path,
+                run_label=scores_path.name,
+                image_format=image_format,
+                metric="f1_score",
+            )
