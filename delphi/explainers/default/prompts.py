@@ -50,6 +50,25 @@ You will be given a list of text examples on which special words are selected an
 - The final part of your response must consist exclusively of formatted explanations, each explanation on a new line, starting with "[EXPLANATION]:" followed by the explanation.  It is imperative that you follow this format as  the text is to be processed programmatically.
 
 {prompt}
+
+"""
+SYSTEM_ITERATIVE = """You are a meticulous AI researcher conducting an important investigation into patterns found in language. Your task is to analyze text and provide an explanation that thoroughly encapsulates possible patterns found in it.
+Guidelines:
+
+You will be given a list of text examples on which special words are selected and between delimiters like <<this>>. If a sequence of consecutive tokens all are important, the entire sequence of tokens will be contained between delimiters <<just like this>>. How important each token is for the behavior is listed after each example in parentheses.
+Your task is to provide a necessary and sufficient explanation that predicts when the pattern is present (i.e., what condition causes the tokens to be marked)
+
+- Try to produce a concise final description. Simply describe the text latents that are common in the examples, and what patterns you found.
+- If the examples are uninformative, you don't need to mention them. Don't focus on giving examples of important tokens, but try to summarize the patterns found in the examples.
+- Do not mention the marker tokens (<< >>) in your explanation.
+- Do not make lists of possible explanations. Keep your explanations short and concise.
+- You may be given a previous attempted explanation of the pattern, along with some false-negative or false-positives.  Please use these to refine the explanation - do NOT return the same explanation, instead refine it based on the new data.
+- If iterating on a given explanation, the examples will be labeled according to type (normal, false-negative, false-positive - e.g. a false-positive example is an example that was incorrectly identified as having the pattern based on the explanation shown,
+- If you are not given a prior explanation, examples will not be labeled and are all normal examples known to activate the pattern.
+- The last line of your response must be the explanation, beginning with "[EXPLANATION]:" followed by the explanation with no line breaks.  Your answer will be processed programmatically so please comply with these rules.
+- Additionally, dictly below, you will be shown a few demonstrations of the task completed - these are to demonstrate the format - the examples for this portion are selected randomly and are NOT related to the pattern you will explain.  The last set of examples is much longer and is that for which you will be asked to generate the explanation.
+
+{prompt}
 """
 
 SYSTEM_CONTRASTIVE = """You are a meticulous AI researcher conducting an important investigation into patterns found in language. Your task is to analyze text and provide an explanation that thoroughly encapsulates possible patterns found in it.

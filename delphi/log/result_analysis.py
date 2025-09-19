@@ -213,8 +213,10 @@ def load_data(scores_path: Path, modules: list[str]):
                     )
 
                 latent_dfs.append(latent_df)
-
-    return pd.concat(latent_dfs, ignore_index=True), counts
+    if len(latent_dfs) > 1:
+        return pd.concat(latent_dfs, ignore_index=True), counts
+    else:
+        return latent_dfs[0], counts
 
 
 def frequency_weighted_f1(

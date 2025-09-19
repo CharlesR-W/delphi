@@ -19,7 +19,7 @@ from delphi.scorers.scorer import ScorerResult
 
 from ..default.prompt_builder import build_prompt as default_prompt
 from ..explainer import Explainer
-from .prompt_builder import build_prompt
+from .prompt_builder import iterative_build_prompt
 
 # we use this type variable to ensure that the examples are either
 # ActivatingExample or NonActivatingExample
@@ -37,6 +37,9 @@ class IterativeExplainer(Explainer):
 
     iterative_max_num_false_negatives: int = 20
     """Maximum number of extra false negatives to include in refinement prompts."""
+
+    append_round_to_prompt: bool = False
+    """If True, append the round number to the prompt to encourage diversity."""
 
     def _to_string_examples(
         self, examples: list[Examples], show_activations: bool
@@ -77,9 +80,17 @@ class IterativeExplainer(Explainer):
                 false_positives.append(example)
         return false_positives, false_negatives
 
-    def _build_prompt(self, record: LatentRecord) -> list[dict]:
+    def _build_prompt(
+        self, record: LatentRecord
+    ) -> list[dict]:  # iterative, not final, single result
         examples = record.train
-        if record.explanation == "":
+        # Treat missing or unparsable explanations as empty to force an initial prompt
+        explanation_text = record.explanation
+        is_unparsed = "could not be parsed" in explanation_text.lower()
+
+        if is_unparsed:
+            print(f"[IterativeExplainer] Unparsed explanation: {explanation_text}")
+        if explanation_text == "" or is_unparsed:
             # If there is no explanation, we use the default prompt
             highlighted_examples = self._to_string_examples(examples, self.activations)
             if getattr(self, "verbose", False):
@@ -87,7 +98,7 @@ class IterativeExplainer(Explainer):
                     f"[IterativeExplainer] Building initial prompt \
                     with {len(examples)} examples"
                 )
-            return default_prompt(highlighted_examples, self.activations)
+            messages = default_prompt(highlighted_examples, self.activations)
         else:
             # If there is explanation, use the explanation, the normal examples
             # and the extra examples
@@ -111,22 +122,43 @@ class IterativeExplainer(Explainer):
                 false_positives[:number_extra_false_positives], False
             )
             false_negatives_examples = self._to_string_examples(
-                false_negatives[:number_extra_false_negatives], False
+                false_negatives[:number_extra_false_negatives], self.activations
             )
 
-            if getattr(self, "verbose", False):
+            if True:  # getattr(self, "verbose", False):
                 print(
                     f"[IterativeExplainer] Refining explanation; showing \
                         FP={number_extra_false_positives}, \
                             FN={number_extra_false_negatives}"
                 )
 
-            return build_prompt(
+            messages = iterative_build_prompt(
                 record.explanation,
                 normal_examples,
                 false_positives_examples,
                 false_negatives_examples,
             )
+
+        # Optionally append the round number to the prompt as a diversity tag
+        round_idx = getattr(record, "explanation_id", None)
+        if self.append_round_to_prompt and round_idx is not None:
+            try:
+                # find the last user message to append the tag
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "user":
+                        messages[i]["content"] = (
+                            messages[i].get("content", "") + f"\nRound: {round_idx}"
+                        )
+                        if getattr(self, "verbose", False):
+                            print(
+                                f"[IterativeExplainer] Appended round tag to prompt: Round {round_idx}"
+                            )
+                        break
+            except Exception:
+                pass
+        if getattr(self, "verbose", False):
+            print(f"[IterativeExplainer] Built prompt with {len(messages)} messages")
+        return messages
 
 
 @dataclass
@@ -147,7 +179,7 @@ class HillClimbing:
     iterative_holdout_ratio_of_total: float = 0.1
     """Ratio of total available examples to hold out for final evaluation."""
 
-    iterative_test_ratio_of_total: float = 0.1
+    iterative_test_ratio_of_nonholdout: float = 0.1
     """Ratio of total available examples to use as per-round test set."""
 
     judge_scorer_index: int = 0
@@ -248,12 +280,10 @@ class HillClimbing:
         ]
 
         # Determine per-round test size from configured ratio
-        train_size = max(
-            0,
-            int(
-                len(train_test_activating_examples) * self.iterative_test_ratio_of_total
-            ),
+        train_size = len(train_test_activating_examples) * (
+            1 - self.iterative_test_ratio_of_nonholdout
         )
+        train_size = int(max(20, train_size))
         train_activating_examples = train_test_activating_examples[train_size:]
         train_non_activating_examples = train_test_non_activating_examples[train_size:]
         test_activating_examples = train_test_activating_examples[:train_size]
@@ -270,6 +300,7 @@ class HillClimbing:
     async def _run_scorers(
         self,
         train_test_record: LatentRecord,
+        round_idx: int,
         holdout_activating_examples: list[Example],
         holdout_non_activating_examples: list[Example],
         test_activating_examples: list[Example],
@@ -277,7 +308,7 @@ class HillClimbing:
     ):
         test_scorer_results = []
         holdout_scorer_results = []
-        for lv, scorer_with_path in enumerate(self.scorers_with_paths):
+        for scorer_idx, scorer_with_path in enumerate(self.scorers_with_paths):
             scorer, score_dir = scorer_with_path
             test_scorer_results.append(
                 await scorer(train_test_record)
@@ -288,7 +319,9 @@ class HillClimbing:
             train_test_record.not_active = holdout_non_activating_examples
             holdout_scorer_results.append(await scorer(train_test_record))
             # use holdout results for writing:
-            self.scorer_postprocess(holdout_scorer_results[-1], score_dir=score_dir)
+            self.scorer_postprocess(
+                holdout_scorer_results[-1], score_dir=score_dir, round_idx=round_idx
+            )
             # revert
             train_test_record.test = test_activating_examples
             train_test_record.not_active = test_non_activating_examples
@@ -296,7 +329,7 @@ class HillClimbing:
 
     async def _run_round(
         self,
-        lv: int,
+        round_idx: int,
         record: LatentRecord,
         train_activating_examples: list[Example],
         train_non_activating_examples: list[Example],
@@ -314,30 +347,57 @@ class HillClimbing:
             explanation=record.explanation,
             extra_examples=extra_examples,
         )
+        # Attach round index BEFORE prompting so it can be used to build the prompt
+        try:
+            setattr(train_test_record, "explanation_id", round_idx)
+            if getattr(self, "verbose", False) and self.append_round_to_prompt:
+                print(
+                    f"[IterativeExplainer] Set explanation_id (round) prior to prompting: {round_idx}"
+                )
+        except Exception:
+            pass
         start_time = time.time()
         explanation = await self.explainer(train_test_record)
         train_test_record.explanation = explanation.explanation
+        # Retry once if the explanation could not be parsed; then continue gracefully
+        exp_text = (explanation.explanation or "").strip()
+        if "could not be parsed" in exp_text.lower():
+            try:
+                if getattr(self, "verbose", False):
+                    print(
+                        f"[IterativeExplainer] Unparsed explanation in round {round_idx}; "
+                        f"retrying once"
+                    )
+                # Force an initial-style prompt on retry
+                train_test_record.explanation = ""
+                retry_explanation = await self.explainer(train_test_record)
+                retry_text = (retry_explanation.explanation or "").strip()
+                if "could not be parsed" not in retry_text.lower():
+                    explanation = retry_explanation
+                    train_test_record.explanation = explanation.explanation
+                else:
+                    # Keep explanation empty going forward to avoid refining on invalid text
+                    train_test_record.explanation = ""
+            except Exception:
+                # On any retry error, proceed with empty explanation
+                train_test_record.explanation = ""
         end_time = time.time()
         print(
-            f"Latent: {train_test_record.latent}; Round: {lv}; Time taken for explanation: {end_time - start_time} seconds"
-            f"Explanation: {explanation.explanation}"
+            f"Latent: {train_test_record.latent}; Round: {round_idx}; Time taken for "
+            f"explanation: {end_time - start_time} seconds"
+            f"Explanation: {train_test_record.explanation}"
         )
-
-        # print("----- First explanation ------")
-        print(explanation.explanation)
-        if explanation.explanation == "Explanation could not be parsed.":
-            # TODO: Do I want this?
-            return None
 
         start_time = time.time()
         # Attach round index for downstream logging/postprocessing to distinguish files
         try:
-            setattr(train_test_record, "explanation_id", lv)
+            setattr(train_test_record, "explanation_id", round_idx)
         except Exception:
             pass
 
         test_scorer_results, holdout_scorer_results = await self._run_scorers(
             train_test_record,
+            round_idx,
             holdout_activating_examples,
             holdout_non_activating_examples,
             test_activating_examples,
@@ -351,7 +411,7 @@ class HillClimbing:
             holdout_scorer_results[self.judge_scorer_index].score
         )
         print(
-            f"Latent: {train_test_record.latent}; Round: {lv}; Time\
+            f"Latent: {train_test_record.latent}; Round: {round_idx}; Time\
                 taken for score: {end_time - start_time} seconds"
             f"Judge holdout score: {judge_holdout_f1_score}"
         )
@@ -376,7 +436,9 @@ class HillClimbing:
         # call scorer_postprocess to save the best score - best is written to special dictory; all other
         # scores are written by the normal postprocess fns
         _, score_dir = self.scorers_with_paths[self.judge_scorer_index]
-        self.scorer_postprocess(best_result, score_dir=score_dir, best=True)
+        self.scorer_postprocess(
+            best_result, score_dir=score_dir, is_final=True, round_idx=None
+        )
 
         return ExplainerResult(
             record=best_result.record,
@@ -400,15 +462,8 @@ class HillClimbing:
         explanations: list[ExplainerResult] = []
         final_explanation = None  # best or last according to select_strategy
         for lv in range(self.iterative_num_rounds):
-            # print(f"----- Loop {lv} ------")
-
-            (
-                holdout_f1_score,
-                wrong_examples,
-                explanation,
-                round_holdout_scorer_results,
-            ) = await self._run_round(
-                lv=lv,
+            round_results = await self._run_round(
+                round_idx=lv,
                 record=record,
                 train_activating_examples=train_activating_examples,
                 train_non_activating_examples=train_non_activating_examples,
@@ -419,22 +474,30 @@ class HillClimbing:
                 extra_examples=wrong_examples if wrong_examples is not None else None,
             )
 
+            # if round_results is None:
+            #    print(f"Round {lv} failed to generate an explanation")
+            #    #continue
+            # else:
+            (
+                holdout_f1_score,
+                wrong_examples,
+                explanation,
+                round_holdout_scorer_results,
+            ) = round_results
+
             explanations.append(explanation)
             all_holdout_scorer_results.append(round_holdout_scorer_results)
             # Carry forward the latest explanation to inform the next round
-            record.explanation = explanation.explanation
-            # print("----- Holdout score ------")
-            # final_score = self._compute_f1_score(scorer_results)
-            # record.explanation = new_explanation.explanation
-            # first_explanation = new_explanation
-            # if new_holdout_score > holdout_score:
-            #    holdout_score = new_holdout_score
-            #    record.explanation = new_explanation.explanation
-            #    first_explanation = new_explanation
-        # print("Initial score: ", holdout_score)
-        # print("Last explanation: ", record.explanation)
-        # print("Final score: ", final_score)
+            try:
+                latest_text = explanation.explanation
+            except Exception:
+                latest_text = ""
+            if "could not be parsed" in latest_text.lower():
+                latest_text = ""
+            record.explanation = latest_text
+
         if self.select_strategy == "best":
+            # Compute best round according to judge scorer's f1
             judge_holdout_results: list[ScorerResult] = [
                 round_results[self.judge_scorer_index]
                 for round_results in all_holdout_scorer_results
@@ -443,4 +506,11 @@ class HillClimbing:
             final_explanation = self._select_best_explanation(judge_holdout_results)
         else:
             final_explanation = explanations[-1]
+            final_score: ScorerResult = all_holdout_scorer_results[-1][
+                self.judge_scorer_index
+            ]
+            _, score_dir = self.scorers_with_paths[self.judge_scorer_index]
+            self.scorer_postprocess(
+                final_score, score_dir=score_dir, is_final=True, round_idx=None
+            )
         return explanations, final_explanation

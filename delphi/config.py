@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from multiprocessing import cpu_count
-from typing import Literal
+from typing import Literal, Optional
 
 import torch
 from simple_parsing import Serializable, field, list_field
@@ -162,10 +162,22 @@ class RunConfig(Serializable):
     'simulation'."""
 
     # Number of explanations to generate when using the BestOfK explainer
-    bestofk_num_explanations: int = 3
+    bestofk_num_explanations: Optional[int] = field(default=3)
 
     # Number of iterative refinement rounds when using the Iterative explainer
-    iterative_num_rounds: int = 3
+    iterative_num_rounds: Optional[int] = field(default=3)
+
+    explainer_temperature: Optional[float] = field(default=0.0)
+    """Temperature for generation."""
+
+    judge_scorer_index: Optional[int] = field(default=0)
+    """Index of the scorer to use for judging the iterative explanation."""
+
+    bestofk_return_only_best: Optional[bool] = field(default=True)
+    """Whether to return only the best explanation."""
+
+    bestofk_run_all_scorers: Optional[bool] = field(default=True)
+    """Whether to run all scorers."""
 
     name: str = ""
     """The name of the run. Results are saved in a directory with this name."""
@@ -227,18 +239,21 @@ class RunConfig(Serializable):
     )
     """Port to use for the vLLM server."""
 
+    iterative_append_round_to_prompt: Optional[bool] = field(default=False)
+    """Whether to append the round number to the prompt to encourage diversity."""
+
     # Iterative-specific configuration
-    iterative_num_rounds: int = field(default=3)
+    iterative_num_rounds: Optional[int] = field(default=3)
     """Number of iterative refinement rounds for the iterative explainer."""
 
-    iterative_holdout_ratio_of_total: float = field(default=0.1)
+    iterative_holdout_ratio_of_total: Optional[float] = field(default=0.1)
     """Ratio of total available test/non-activating examples to hold out for final evaluation."""
 
-    iterative_test_ratio_of_total: float = field(default=0.1)
+    iterative_test_ratio_of_nonholdout: Optional[float] = field(default=0.1)
     """Ratio of total available test/non-activating examples to use as the test set per round."""
 
-    iterative_max_num_false_positives: int = field(default=20)
+    iterative_max_num_false_positives: Optional[int] = field(default=20)
     """Maximum number of false positive extra examples to include when refining prompts."""
 
-    iterative_max_num_false_negatives: int = field(default=20)
+    iterative_max_num_false_negatives: Optional[int] = field(default=20)
     """Maximum number of false negative extra examples to include when refining prompts."""
