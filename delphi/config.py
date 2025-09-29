@@ -9,19 +9,22 @@ from simple_parsing import Serializable, field, list_field
 @dataclass
 class SamplerConfig(Serializable):
     n_examples_train: int = 40
-    """Number of examples to sample for latent explanation generation."""
+    """Target number of activating examples in the train/test pool.
+    These are sampled upstream and then split per-round for explainers.
+    This is a pool size, not necessarily the exact number shown each round."""
 
     n_examples_test: int = 50
-    """Number of examples to sample for latent explanation testing."""
+    """Target number of activating examples reserved for holdout/evaluation.
+    Used as a pool for final evaluation or per your split policy."""
 
     n_quantiles: int = 10
     """Number of latent activation quantiles to sample."""
 
     train_type: Literal["top", "random", "quantiles", "mix"] = "quantiles"
-    """Type of sampler to use for latent explanation generation."""
+    """Strategy to build the train/test activating pool."""
 
     test_type: Literal["quantiles"] = "quantiles"
-    """Type of sampler to use for latent explanation testing."""
+    """Strategy to build the holdout activating pool."""
 
     ratio_top: float = 0.2
     """Ratio of top examples to use for training, if using mix."""
@@ -89,7 +92,8 @@ class CacheConfig(Serializable):
 
     cache_ctx_len: int = 256
     """Context length for caching latent activations.
-    Each batch is shape (batch_size, ctx_len)."""
+    Each batch is shape (batch_size, ctx_len).
+    Must be divisible by ConstructorConfig.example_ctx_len for windowing."""
 
     n_tokens: int = 10_000_000
     """Number of tokens to cache."""
@@ -257,3 +261,33 @@ class RunConfig(Serializable):
 
     iterative_max_num_false_negatives: Optional[int] = field(default=20)
     """Maximum number of false negative extra examples to include when refining prompts."""
+
+    # Iterative prompt composition
+    iterative_max_num_true_positives: Optional[int] = field(default=0)
+    """Maximum number of true positive extra examples to include when refining prompts."""
+
+    iterative_max_num_true_negatives: Optional[int] = field(default=0)
+    """Maximum number of true negative extra examples to include when refining prompts."""
+
+    # Whether to reveal scores/history to the explainer and what to carry forward
+    iterative_carryforward_strategy: Optional[Literal["best", "last"]] = field(
+        default="last"
+    )
+    """When carrying forward explanation text to the next round, use the
+    best-so-far (judged on test set) or the last round's explanation."""
+
+    iterative_show_score_to_explainer: Optional[bool] = field(default=False)
+    """If True, include the previous round's score in the explainer prompt."""
+
+    iterative_history_only: Optional[bool] = field(default=False)
+    """If True, show only prior explanations (and scores if enabled) to the
+    explainer; do not show examples. Overrides other flags."""
+
+    iterative_always_new_train_examples: Optional[bool] = field(default=False)
+    """If True, sample new train/test subsets from the pools each round;
+    if False, reuse the same subsets across rounds."""
+
+    iterative_fraction_test_of_test_plus_train: Optional[float] = field(default=0.33)
+    """Fraction of the (train+test) activating pool to allocate to per-round test.
+    The remaining portion is used for per-round train. The activating holdout pool
+    is provided separately via SamplerConfig.n_examples_test (record.test)."""

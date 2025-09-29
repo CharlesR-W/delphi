@@ -1,4 +1,3 @@
-
 import asyncio
 import json
 from dataclasses import dataclass
@@ -53,7 +52,7 @@ class Offline(Client):
         num_gpus: int = 2,
         enforce_eager: bool = False,
         statistics: bool = False,
-        server_port: int|None = None,
+        server_port: int | None = None,
     ):
         """Client for offline generation. Models not already present in the on-disk
         HuggingFace cache will be downloaded. Note that temperature must be increased
@@ -61,6 +60,7 @@ class Offline(Client):
         """
         super().__init__(model)
         self.model = model
+        self.max_model_len = max_model_len
         self.queue = asyncio.Queue()
         self.task = None
         if server_port is None:
@@ -72,18 +72,31 @@ class Offline(Client):
                 max_model_len=max_model_len,
                 enforce_eager=enforce_eager,
             )
-            
+
         else:
             self.base_url = f"http://localhost:{server_port}/v1"
             self.client = AsyncOpenAI(base_url=self.base_url, api_key="EMPTY")
         self.sampling_params = SamplingParams(max_tokens=number_tokens_to_generate)
         self.tokenizer = AutoTokenizer.from_pretrained(model)
         self.batch_size = batch_size
-        self.statistics = statistics 
+        self.statistics = statistics
 
         if self.statistics:
             self.statistics_path = Path("statistics")
             self.statistics_path.mkdir(parents=True, exist_ok=True)
+
+    def _warn_if_context_exceeded(self, prompt_length: int) -> None:
+        if not isinstance(self.client, LLM):
+            return
+        max_tokens = getattr(self.sampling_params, "max_tokens", 0) or 0
+        total_requested = prompt_length + max_tokens
+        if self.max_model_len and total_requested > self.max_model_len:
+            print(
+                "!!! CONTEXT WINDOW WARNING !!! "
+                f"prompt tokens ({prompt_length}) + max tokens ({max_tokens}) "
+                f"= {total_requested} exceeds configured limit {self.max_model_len} "
+                f"for model {self.model}. Reduce prompt length or max tokens."
+            )
 
     async def process_func(
         self,
@@ -112,11 +125,14 @@ class Offline(Client):
             prompt = self.tokenizer.apply_chat_template(
                 batch, add_generation_prompt=True, tokenize=True
             )
+            self._warn_if_context_exceeded(len(prompt))
             prompts.append(prompt)
             if self.statistics:
                 non_cached_tokens = len(
                     self.tokenizer.apply_chat_template(
-                        batch[-1:], add_generation_prompt=True, tokenize=True  # type: ignore
+                        batch[-1:],
+                        add_generation_prompt=True,
+                        tokenize=True,  # type: ignore
                     )
                 )
                 statistics.append(
@@ -136,7 +152,7 @@ class Offline(Client):
                     use_tqdm=False,
                 ),
             )
-        else: # OpenAI server
+        else:  # OpenAI server
             tasks = [
                 self.client.chat.completions.create(
                     model=self.model,
@@ -144,16 +160,23 @@ class Offline(Client):
                     temperature=getattr(self.sampling_params, "temperature", 0.7),
                     max_tokens=getattr(self.sampling_params, "max_tokens", 500),
                     extra_body={
-                        "logprobs": bool(getattr(self.sampling_params, "logprobs", True)),
-                        "prompt_logprobs": bool(getattr(self.sampling_params, "prompt_logprobs", False)),
-                    } if getattr(self.sampling_params, "logprobs", None) or getattr(self.sampling_params, "prompt_logprobs", None) else None,
+                        "logprobs": bool(
+                            getattr(self.sampling_params, "logprobs", True)
+                        ),
+                        "prompt_logprobs": bool(
+                            getattr(self.sampling_params, "prompt_logprobs", False)
+                        ),
+                    }
+                    if getattr(self.sampling_params, "logprobs", None)
+                    or getattr(self.sampling_params, "prompt_logprobs", None)
+                    else None,
                 )
                 for batch in batches
             ]
             responses: list[ChatCompletion] = await asyncio.gather(*tasks)
 
         new_response = []
-        if isinstance(self.client, LLM): # vLLM
+        if isinstance(self.client, LLM):  # vLLM
             for i, r in enumerate(responses):
                 logprobs, prompt_logprobs = self._parse_logprobs(r)
                 if self.statistics:
@@ -162,7 +185,8 @@ class Offline(Client):
                     statistics[i].prompt = batches[i][-1]["content"]  # type: ignore
                     statistics[i].response = r.outputs[0].text
                     with open(
-                        f"statistics/{hash(batches[i][-1]['content'][-100:])}.json", "w"  # type: ignore
+                        f"statistics/{hash(batches[i][-1]['content'][-100:])}.json",
+                        "w",  # type: ignore
                     ) as f:
                         json.dump(statistics[i].__dict__, f, indent=4)
                 new_response.append(
@@ -172,16 +196,17 @@ class Offline(Client):
                         prompt_logprobs=prompt_logprobs,
                     )
                 )
-        else: # OpenAI server
+        else:  # OpenAI server
             for i, r in enumerate(responses):
-                text = r.choices[0].message.content # type: ignore
+                text = r.choices[0].message.content  # type: ignore
                 logprobs, prompt_logprobs = self._parse_logprobs(r)
                 if self.statistics:
                     statistics[i].num_generated_tokens = len(text)  # Approximate
                     statistics[i].prompt = batches[i][-1]["content"]  # type: ignore
                     statistics[i].response = text
                     with open(
-                        f"statistics/{hash(batches[i][-1]['content'][-100:])}.json", "w"  # type: ignore
+                        f"statistics/{hash(batches[i][-1]['content'][-100:])}.json",
+                        "w",  # type: ignore
                     ) as f:
                         json.dump(statistics[i].__dict__, f, indent=4)
                 new_response.append(
@@ -206,7 +231,7 @@ class Offline(Client):
         return await future
 
     def _parse_logprobs(self, response):
-        if isinstance(response, ChatCompletion): # OpenAI server
+        if isinstance(response, ChatCompletion):  # OpenAI server
             response_tokens = response.choices[0].message.content
             logprobs = getattr(response.choices[0], "logprobs", None)
             prompt_logprobs = getattr(response.choices[0], "prompt_logprobs", None)
@@ -215,12 +240,12 @@ class Offline(Client):
             response_tokens = response.outputs[0].token_ids
             logprobs = getattr(response.outputs[0], "logprobs", None)
             prompt_logprobs = getattr(response.outputs[0], "prompt_logprobs", None)
-        
+
         if logprobs is None and prompt_logprobs is None:
             return None, None
-        
+
         logprobs_list = None
-        
+
         if logprobs is not None:
             logprobs_list = []
             for i in range(len(logprobs)):

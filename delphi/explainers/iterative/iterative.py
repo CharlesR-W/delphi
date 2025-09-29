@@ -41,6 +41,20 @@ class IterativeExplainer(Explainer):
     append_round_to_prompt: bool = False
     """If True, append the round number to the prompt to encourage diversity."""
 
+    # Optional extra examples beyond FPs/FNs
+    iterative_max_num_true_positives: int = 0
+    """Maximum number of extra true positives to include in refinement prompts."""
+
+    iterative_max_num_true_negatives: int = 0
+    """Maximum number of extra true negatives to include in refinement prompts."""
+
+    # Optional history/score controls
+    show_score_to_explainer: bool = False
+    """If True, include per-round score(s) alongside history when present."""
+
+    history_only: bool = False
+    """If True, only show previous explanations (and scores if enabled), no examples."""
+
     def _to_string_examples(
         self, examples: list[Examples], show_activations: bool
     ) -> str:
@@ -83,6 +97,34 @@ class IterativeExplainer(Explainer):
     def _build_prompt(
         self, record: LatentRecord
     ) -> list[dict]:  # iterative, not final, single result
+        # History-only mode: only show previous explanations (and their scores)
+        if getattr(self, "history_only", False):
+            history_lines: list[str] = []
+            prev_explanations = getattr(record, "previous_explanations", []) or []
+            prev_scores = getattr(record, "previous_test_f1_scores", []) or []
+            for i, exp in enumerate(prev_explanations):
+                score_str = ""
+                if self.show_score_to_explainer and i < len(prev_scores):
+                    score_str = f" (F1={prev_scores[i]:.3f})"
+                history_lines.append(f"Round {i}: [EXPLANATION]: {exp}{score_str}")
+            history_text = (
+                "\n".join(history_lines) if history_lines else "(no prior explanations)"
+            )
+            if getattr(self, "verbose", False):
+                print(
+                    "[IterativeExplainer] history_only=True; building prompt with only prior explanations"
+                )
+            return [
+                {
+                    "role": "system",
+                    "content": "You are refining a concise, faithful explanation for a latent feature.",
+                },
+                {
+                    "role": "user",
+                    "content": f"Prior explanations and scores (if any):\n{history_text}\nReturn ONLY a new [EXPLANATION]: ...",
+                },
+            ]
+
         examples = record.train
         # Treat missing or unparsable explanations as empty to force an initial prompt
         explanation_text = record.explanation
@@ -125,6 +167,22 @@ class IterativeExplainer(Explainer):
                 false_negatives[:number_extra_false_negatives], self.activations
             )
 
+            # Optionally include TP/TN examples attached to the record
+            tp_examples_list = getattr(record, "tp_examples_for_prompt", []) or []
+            tn_examples_list = getattr(record, "tn_examples_for_prompt", []) or []
+            tp_count = min(self.iterative_max_num_true_positives, len(tp_examples_list))
+            tn_count = min(self.iterative_max_num_true_negatives, len(tn_examples_list))
+            true_positive_examples = (
+                self._to_string_examples(tp_examples_list[:tp_count], self.activations)
+                if tp_count > 0
+                else ""
+            )
+            true_negative_examples = (
+                self._to_string_examples(tn_examples_list[:tn_count], False)
+                if tn_count > 0
+                else ""
+            )
+
             if True:  # getattr(self, "verbose", False):
                 print(
                     f"[IterativeExplainer] Refining explanation; showing \
@@ -132,9 +190,32 @@ class IterativeExplainer(Explainer):
                             FN={number_extra_false_negatives}"
                 )
 
+            # Optionally prepend prior history and scores
+            history_prefix = ""
+            if getattr(self, "show_score_to_explainer", False):
+                prev_explanations = getattr(record, "previous_explanations", []) or []
+                prev_scores = getattr(record, "previous_test_f1_scores", []) or []
+                history_lines: list[str] = []
+                for i, exp in enumerate(prev_explanations):
+                    score_str = (
+                        f" (F1={prev_scores[i]:.3f})" if i < len(prev_scores) else ""
+                    )
+                    history_lines.append(f"Round {i}: [EXPLANATION]: {exp}{score_str}")
+                if history_lines:
+                    history_prefix = (
+                        "Prior rounds:\n" + "\n".join(history_lines) + "\n\n"
+                    )
+
+            # Merge optional TP/TN blocks after the standard FP/FN sections
+            augmented_normals = history_prefix + normal_examples
+            if true_positive_examples:
+                augmented_normals += "\n\nTrue Positives:\n" + true_positive_examples
+            if true_negative_examples:
+                augmented_normals += "\n\nTrue Negatives:\n" + true_negative_examples
+
             messages = iterative_build_prompt(
                 record.explanation,
-                normal_examples,
+                augmented_normals,
                 false_positives_examples,
                 false_negatives_examples,
             )
@@ -190,6 +271,9 @@ class HillClimbing:
     'best' selects the explanation with the highest score; 'last' selects the 
     explanation from the final round."""
 
+    always_new_train_examples: bool = False
+    """If True, resample train/test subsets each round from the pools."""
+
     def _compute_f1_score(self, results: list[ClassifierOutput]) -> float:
         tp = 0
         fp = 0
@@ -242,20 +326,15 @@ class HillClimbing:
         list[Example],
         list[Example],
     ]:
-        """Assume _all_ examples are in passed record - splits into train, test,
-        and holdout sets.
-        TODO: right now, it just shuffles train/test in a stupid way -
-        should make this smarter"""
+        """Split pre-sampled pools into train/test and holdout.
+        Policy: prefer sampler-driven sizes if available on record, else ratio.
+        Expects that upstream sampling produced sufficient pools in record.*
+        """
         all_train_examples = record.train
         all_activating_test_examples = record.test
         all_non_activating_test_examples = record.not_active
 
-        requested_test_size_per_round = 10  # TODO: finish implementing this
-        requested_test_size_required = (
-            self.iterative_num_rounds * requested_test_size_per_round
-        )
-
-        # shuffle the examples
+        # Shuffle pools for randomness
         random.shuffle(all_activating_test_examples)
         random.shuffle(all_non_activating_test_examples)
 
@@ -338,7 +417,9 @@ class HillClimbing:
         holdout_activating_examples: list[Example],
         holdout_non_activating_examples: list[Example],
         extra_examples: Optional[list[Example]] = None,
-    ) -> tuple[float, list[Example], ExplainerResult, list[ScorerResult]]:
+    ) -> tuple[
+        float, list[Example], ExplainerResult, list[ScorerResult], list[ScorerResult]
+    ]:
         train_test_record = LatentRecord(
             latent=record.latent,
             train=train_activating_examples,
@@ -347,6 +428,32 @@ class HillClimbing:
             explanation=record.explanation,
             extra_examples=extra_examples,
         )
+        # Carry forward optional history and TP/TN example lists
+        try:
+            setattr(
+                train_test_record,
+                "previous_explanations",
+                getattr(record, "previous_explanations", []),
+            )
+            setattr(
+                train_test_record,
+                "previous_test_f1_scores",
+                getattr(record, "previous_test_f1_scores", []),
+            )
+            if hasattr(record, "tp_examples_for_prompt"):
+                setattr(
+                    train_test_record,
+                    "tp_examples_for_prompt",
+                    getattr(record, "tp_examples_for_prompt"),
+                )
+            if hasattr(record, "tn_examples_for_prompt"):
+                setattr(
+                    train_test_record,
+                    "tn_examples_for_prompt",
+                    getattr(record, "tn_examples_for_prompt"),
+                )
+        except Exception:
+            pass
         # Attach round index BEFORE prompting so it can be used to build the prompt
         try:
             setattr(train_test_record, "explanation_id", round_idx)
@@ -416,11 +523,50 @@ class HillClimbing:
             f"Judge holdout score: {judge_holdout_f1_score}"
         )
         wrong_examples = self._get_wrong_examples(test_scorer_results)
+        # Attach TP/TN for optional prompting
+        try:
+            tp_examples: list[Example] = []
+            tn_examples: list[Example] = []
+            for sr in test_scorer_results:
+                for sample in sr.score:
+                    if sample.correct:
+                        if sample.activating:
+                            tp_examples.append(
+                                ActivatingExample(
+                                    tokens=torch.tensor(0),
+                                    activations=torch.tensor(sample.activations),
+                                    str_tokens=sample.str_tokens,
+                                    normalized_activations=torch.tensor(
+                                        sample.activations
+                                    ),
+                                )
+                            )
+                        else:
+                            tn_examples.append(
+                                NonActivatingExample(
+                                    tokens=torch.tensor(0),
+                                    activations=torch.tensor(sample.activations),
+                                    str_tokens=sample.str_tokens,
+                                )
+                            )
+            # Deduplicate by str_tokens
+            dedup = {}
+            for ex in tp_examples + tn_examples:
+                dedup[tuple(ex.str_tokens)] = ex
+            train_test_record.tp_examples_for_prompt = [
+                ex for ex in dedup.values() if isinstance(ex, ActivatingExample)
+            ]
+            train_test_record.tn_examples_for_prompt = [
+                ex for ex in dedup.values() if isinstance(ex, NonActivatingExample)
+            ]
+        except Exception:
+            pass
         return (
             judge_holdout_f1_score,
             wrong_examples,
             explanation,
             holdout_scorer_results,
+            test_scorer_results,
         )
 
     def _select_best_explanation(
@@ -461,7 +607,19 @@ class HillClimbing:
         all_holdout_scorer_results: list[list[ScorerResult]] = []
         explanations: list[ExplainerResult] = []
         final_explanation = None  # best or last according to select_strategy
+        previous_test_f1_scores: list[float] = []
+        all_test_scorer_results: list[list[ScorerResult]] = []
         for lv in range(self.iterative_num_rounds):
+            # Control whether to reuse same train/test subsets or resample each round
+            if self.always_new_train_examples and lv > 0:
+                (
+                    train_activating_examples,
+                    train_non_activating_examples,
+                    test_activating_examples,
+                    test_non_activating_examples,
+                    holdout_activating_examples,
+                    holdout_non_activating_examples,
+                ) = self._split_train_test_holdout(record)
             round_results = await self._run_round(
                 round_idx=lv,
                 record=record,
@@ -483,18 +641,35 @@ class HillClimbing:
                 wrong_examples,
                 explanation,
                 round_holdout_scorer_results,
+                round_test_scorer_results,
             ) = round_results
 
             explanations.append(explanation)
             all_holdout_scorer_results.append(round_holdout_scorer_results)
+            all_test_scorer_results.append(round_test_scorer_results)
+            previous_test_f1_scores.append(
+                self._compute_f1_score(
+                    round_test_scorer_results[self.judge_scorer_index].score
+                )
+            )
             # Carry forward the latest explanation to inform the next round
-            try:
-                latest_text = explanation.explanation
-            except Exception:
-                latest_text = ""
+            # Strategy: carry forward last or best-so-far (by test F1)
+            carry_strategy = getattr(self, "select_strategy", "last")
+            if carry_strategy == "best" and len(explanations) > 0:
+                scores = [
+                    self._compute_f1_score(r[self.judge_scorer_index].score)
+                    for r in all_test_scorer_results
+                ]
+                best_idx = max(range(len(scores)), key=lambda i: scores[i])
+                latest_text = explanations[best_idx].explanation or ""
+            else:
+                latest_text = explanation.explanation or ""
             if "could not be parsed" in latest_text.lower():
                 latest_text = ""
             record.explanation = latest_text
+            # Save history for optional prompting next round
+            record.previous_explanations = [e.explanation for e in explanations]
+            record.previous_test_f1_scores = previous_test_f1_scores
 
         if self.select_strategy == "best":
             # Compute best round according to judge scorer's f1
