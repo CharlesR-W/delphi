@@ -53,6 +53,7 @@ class Offline(Client):
         enforce_eager: bool = False,
         statistics: bool = False,
         server_port: int | None = None,
+        enable_thinking: bool = False,
     ):
         """Client for offline generation. Models not already present in the on-disk
         HuggingFace cache will be downloaded. Note that temperature must be increased
@@ -61,6 +62,7 @@ class Offline(Client):
         super().__init__(model)
         self.model = model
         self.max_model_len = max_model_len
+        self.enable_thinking = enable_thinking
         self.queue = asyncio.Queue()
         self.task = None
         if server_port is None:
@@ -122,19 +124,11 @@ class Offline(Client):
         statistics = []
 
         for batch in batches:
-            prompt = self.tokenizer.apply_chat_template(
-                batch, add_generation_prompt=True, tokenize=True
-            )
+            prompt = self._apply_chat_template(batch)
             self._warn_if_context_exceeded(len(prompt))
             prompts.append(prompt)
             if self.statistics:
-                non_cached_tokens = len(
-                    self.tokenizer.apply_chat_template(
-                        batch[-1:],
-                        add_generation_prompt=True,
-                        tokenize=True,  # type: ignore
-                    )
-                )
+                non_cached_tokens = len(self._apply_chat_template(batch[-1:]))  # type: ignore
                 statistics.append(
                     Statistics(
                         num_prompt_tokens=len(prompt),
@@ -269,6 +263,27 @@ class Offline(Client):
                 )
 
         return logprobs_list, prompt_logprobs
+
+    def _apply_chat_template(self, batch):
+        kwargs = dict(add_generation_prompt=True, tokenize=True)
+        if self.enable_thinking:
+            kwargs["enable_thinking"] = self.enable_thinking
+        normalized_batch = self._normalize_messages(batch)
+        try:
+            return self.tokenizer.apply_chat_template(normalized_batch, **kwargs)
+        except TypeError:
+            kwargs.pop("enable_thinking", None)
+            return self.tokenizer.apply_chat_template(normalized_batch, **kwargs)
+
+    def _normalize_messages(
+        self, batch: list[Union[dict[str, str], list[dict[str, str]]]]
+    ) -> list[dict[str, Union[str, list[dict[str, str]]]]]:
+        if "qwen" not in self.model.lower():
+            return batch
+        # For Qwen models, we need to keep content as strings for the chat template
+        # The list format is only needed for certain Qwen model versions
+        # For now, return the batch as-is to avoid template errors
+        return batch
 
     async def _process_batches(self):
         """

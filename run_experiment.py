@@ -34,7 +34,7 @@ from delphi.explainers import (
 )
 from delphi.explainers.explainer import ExplainerResult
 from delphi.explainers.iterative.iterative import HillClimbing
-from delphi.latents import LatentCache, LatentDataset
+from delphi.latents import LatentCache, LatentDataset, LatentRecord
 from delphi.latents.neighbours import NeighbourCalculator
 from delphi.log.result_analysis import log_results
 from delphi.pipeline import Pipe, Pipeline, process_wrapper
@@ -195,8 +195,22 @@ async def process_cache(
         )
 
     # Builds the record from result returned by the pipeline
-    def scorer_preprocess(result):
-        return result
+    # Store explanation_id in the record's latent object temporarily for retrieval later
+    def scorer_preprocess(result: ExplainerResult) -> LatentRecord:
+        # Stash the explanation_id on the latent object so we can retrieve it in postprocess
+        if result.explanation_id is not None:
+            result.record.latent._explanation_id = result.explanation_id
+        return result.record
+
+    def format_json_readable(json_str: str) -> str:
+        """Add newlines after closing curly braces to make JSON more readable."""
+        import re
+
+        # Add newline after each closing curly brace
+        formatted = re.sub(
+            r"}", "}\n", json_str.decode() if isinstance(json_str, bytes) else json_str
+        )
+        return formatted
 
     # Saves the score to a file
     def scorer_postprocess(  # Writes per-round scores for bestofk and iterative
@@ -211,22 +225,40 @@ async def process_cache(
 
         # For bestofk and iterative (per-round), save all scores to multi_scores folder
         if run_cfg.explainer == "bestofk" and not is_final:
-            assert isinstance(result, list)
-            for round_idx, res in enumerate(result):
+            # BestOfK can return either a single ScorerResult or a list
+            if isinstance(result, list):
+                for round_idx, res in enumerate(result):
+                    out_path = (
+                        score_dir
+                        / "multi_scores"
+                        / f"{safe_latent_name}_{round_idx}.txt"
+                    )
+                    with open(out_path, "wb") as f:
+                        f.write(format_json_readable(orjson.dumps(res.score)).encode())
+                    if run_cfg.verbose:
+                        print(f"[scorer_postprocess] Wrote multi-score: {out_path}")
+            else:
+                # Single result - extract explanation_id that was stashed in scorer_preprocess
+                # The explanation_id tells us which round this is
+                explanation_id = getattr(tmp[0].record.latent, "_explanation_id", 0)
                 out_path = (
-                    score_dir / "multi_scores" / f"{safe_latent_name}_{round_idx}.txt"
+                    score_dir
+                    / "multi_scores"
+                    / f"{safe_latent_name}_{explanation_id}.txt"
                 )
                 with open(out_path, "wb") as f:
-                    f.write(orjson.dumps(res.score))
+                    f.write(format_json_readable(orjson.dumps(result.score)).encode())
                 if run_cfg.verbose:
-                    print(f"[scorer_postprocess] Wrote multi-score: {out_path}")
+                    print(
+                        f"[scorer_postprocess] Wrote single multi-score round {explanation_id}: {out_path}"
+                    )
         elif run_cfg.explainer == "iterative":
             if is_final:
                 assert not isinstance(result, list)  # is_final mustnt give a list
                 # For the selected best explanation, also emit a top-level score file
                 out_path = score_dir / f"{safe_latent_name}.txt"
                 with open(out_path, "wb") as f:
-                    f.write(orjson.dumps(tmp[0].score))
+                    f.write(format_json_readable(orjson.dumps(tmp[0].score)).encode())
                 if run_cfg.verbose:
                     print(
                         f"[scorer_postprocess] Wrote iterative FINAL score: {out_path}"
@@ -240,7 +272,9 @@ async def process_cache(
                             / f"{safe_latent_name}_{round_idx}.txt"
                         )
                         with open(out_path, "wb") as f:
-                            f.write(orjson.dumps(res.score))
+                            f.write(
+                                format_json_readable(orjson.dumps(res.score)).encode()
+                            )
                         if run_cfg.verbose:
                             print(
                                 f"[scorer_postprocess] Wrote iterative multi-score: {out_path}"
@@ -253,7 +287,9 @@ async def process_cache(
                         / f"{safe_latent_name}_{round_idx}.txt"
                     )
                     with open(out_path, "wb") as f:
-                        f.write(orjson.dumps(result.score))
+                        f.write(
+                            format_json_readable(orjson.dumps(result.score)).encode()
+                        )
                     if run_cfg.verbose:
                         print(
                             f"[scorer_postprocess] Wrote iterative multi-score: {out_path}"
@@ -262,7 +298,7 @@ async def process_cache(
             assert not isinstance(result, list)
             out_path = score_dir / f"{safe_latent_name}.txt"
             with open(out_path, "wb") as f:
-                f.write(orjson.dumps(result.score))
+                f.write(format_json_readable(orjson.dumps(result.score)).encode())
             if run_cfg.verbose:
                 print(f"[scorer_postprocess] Wrote score: {out_path}")
 
@@ -325,63 +361,52 @@ async def process_cache(
 
         def explainer_postprocess(
             explainer_results: ExplainerResult
-            | Tuple[list[ExplainerResult], ExplainerResult],
+            | Tuple[ExplainerResult, list[ExplainerResult]],
             is_final: bool = False,
         ):
-            # If we have multiple explanations with a selected one (bestofk/iterative),
-            # save all to multi_explanations and persist the selected as final.
-            if isinstance(explainer_results, tuple):
-                all_explanations, selected_explanation = explainer_results
-                for round_idx, er in enumerate(all_explanations):
-                    filename = f"{er.record.latent}_{round_idx}.txt"
-                    with open(
-                        explanations_path / "multi_explanations" / filename,
-                        "wb",
-                    ) as f:
-                        f.write(orjson.dumps(er.explanation))
-                    if run_cfg.verbose:
-                        print(
-                            f"[explainer_postprocess] Wrote multi-explanation: {explanations_path / 'multi_explanations' / filename}"
-                        )
-                # Persist the selected explanation as the final one
-                filename = f"{selected_explanation.record.latent}.txt"
-                with open(explanations_path / filename, "wb") as f:
-                    f.write(orjson.dumps(selected_explanation.explanation))
+            def write_explanation(
+                explainer_result: ExplainerResult,
+                filename: str,
+                subdir: str | None = None,
+            ):
+                path = (
+                    explanations_path / filename
+                    if subdir is None
+                    else explanations_path / subdir / filename
+                )
+                with open(path, "wb") as f:
+                    f.write(orjson.dumps(explainer_result.explanation))
                 if run_cfg.verbose:
-                    print(
-                        f"[explainer_postprocess] Wrote selected explanation: {explanations_path / filename}"
+                    print(f"[explainer_postprocess] Wrote explanation: {path}")
+
+            if isinstance(explainer_results, tuple):
+                explainer_result, all_explanations = explainer_results
+                # Save all explanations to multi_explanations
+                for round_idx, explanation in enumerate(all_explanations):
+                    filename = f"{explanation.record.latent}_{round_idx}.txt"
+                    write_explanation(
+                        explanation, filename, subdir="multi_explanations"
                     )
+                # Save the selected explanation as the final one
+                filename = f"{explainer_result.record.latent}.txt"
+                write_explanation(explainer_result, filename)
                 return explainer_results
             else:
-                # if best, or simply single explanation, save to explanations_path as the "final" explanation
-                if (
-                    is_final
-                    or getattr(explainer_results, "explanation_id", None) is None
-                ):
-                    filename = f"{explainer_results.record.latent}.txt"
-                    with open(
-                        explanations_path / filename,
-                        "wb",
-                    ) as f:
-                        f.write(orjson.dumps(explainer_results.explanation))
-                    if run_cfg.verbose:
-                        print(
-                            f"[explainer_postprocess] Wrote explanation: {explanations_path / filename}"
-                        )
+                explainer_result = explainer_results  # single explanation
+                explanation_id = getattr(explainer_result, "explanation_id", None)
+
+                # For BestOfK, if it's a single result, it's the best one and should be saved as final
+                # For other explainers, save as final if is_final=True or explanation_id is None
+                if run_cfg.explainer == "bestofk" or is_final or explanation_id is None:
+                    filename = f"{explainer_result.record.latent}.txt"
+                    write_explanation(explainer_result, filename)
                 else:
-                    filename = f"{explainer_results.record.latent}_{explainer_results.explanation_id}.txt"
+                    filename = f"{explainer_result.record.latent}_{explanation_id}.txt"
+                    write_explanation(
+                        explainer_result, filename, subdir="multi_explanations"
+                    )
 
-                    with open(
-                        explanations_path / "multi_explanations" / filename,
-                        "wb",
-                    ) as f:
-                        f.write(orjson.dumps(explainer_results.explanation))
-                    if run_cfg.verbose:
-                        print(
-                            f"[explainer_postprocess] Wrote multi-explanation: {explanations_path / 'multi_explanations' / filename}"
-                        )
-
-            return explainer_results
+                return explainer_results
 
         if run_cfg.constructor_cfg.non_activating_source == "FAISS":
             explainer = ContrastiveExplainer(
@@ -398,9 +423,12 @@ async def process_cache(
                 scorer_postprocess=scorer_postprocess,
                 scorer_preprocess=scorer_preprocess,
                 temperature=run_cfg.explainer_temperature,
-                judge_scorer_index=run_cfg.bestofk_judge_scorer_index,
+                judge_scorer_index=getattr(
+                    run_cfg, "bestofk_judge_scorer_index", run_cfg.judge_scorer_index
+                ),
                 return_only_best=run_cfg.bestofk_return_only_best,
                 run_all_scorers=run_cfg.bestofk_run_all_scorers,
+                is_multishot=run_cfg.bestofk_is_multishot,
             )
         elif run_cfg.explainer == "iterative":
             # Iterative hill-climbing orchestrates explanation + scoring internally
@@ -421,6 +449,7 @@ async def process_cache(
                     run_cfg, "iterative_show_score_to_explainer", False
                 ),
                 history_only=getattr(run_cfg, "iterative_history_only", False),
+                allow_tp_examples=getattr(run_cfg, "iterative_allow_tp_examples", True),
             )
             explainer = HillClimbing(
                 scorers_with_paths=scorers_with_paths,
@@ -773,7 +802,8 @@ def start_server_if_not_running(server_port: int, run_cfg: RunConfig):
 
         model_name_lower = str(getattr(run_cfg, "explainer_model", "")).lower()
         if "qwen" in model_name_lower:
-            cmd.append("--nothink")
+            # cmd.append("--disable-think")
+            pass
 
         # Reduce vLLM logging verbosity
         os.environ["VLLM_LOGGING_LEVEL"] = os.environ.get(
@@ -857,13 +887,13 @@ def default_run_config() -> RunConfig:
 
     constructor_cfg = ConstructorConfig(
         example_ctx_len=32,
-        min_examples=200,
+        min_examples=200,  # gate only
         n_non_activating=60,
     )
 
     sampler_cfg = SamplerConfig(
         # NB: for now, this split does NOT work for iterative - iterative manages its own train/test/holdout splits
-        n_examples_train=200,  # 200
+        n_examples_train=50,  # 200
         n_examples_test=100,  # 100
         n_quantiles=5,
     )
@@ -882,7 +912,7 @@ def default_run_config() -> RunConfig:
         hookpoints=["layers.5.mlp"],
         # explainer_model="hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
         explainer_model="Qwen/Qwen2.5-32B-Instruct",
-        explainer_model_max_len=8192,
+        explainer_model_max_len=8192 * 4,
         explainer_provider="offline",
         server_port=8000,  # if set, assumes local server is running.  'None' will start server
         explainer="iterative",
@@ -897,8 +927,9 @@ def default_run_config() -> RunConfig:
         judge_scorer_index=1,  # used for both bestofk and iterative
         # bestofk only
         bestofk_num_explanations=3,
-        bestofk_return_only_best=True,
+        bestofk_return_only_best=False,
         bestofk_run_all_scorers=True,
+        bestofk_is_multishot=True,
         # iterative only
         iterative_num_rounds=5,
         iterative_holdout_ratio_of_total=0.1,
@@ -911,7 +942,6 @@ def default_run_config() -> RunConfig:
         iterative_show_score_to_explainer=False,
         iterative_history_only=False,
         iterative_always_new_train_examples=False,
-        iterative_split_uses_sampler_sizes=True,
         # Optional TP/TN in prompts
         iterative_max_num_true_positives=0,
         iterative_max_num_true_negatives=0,

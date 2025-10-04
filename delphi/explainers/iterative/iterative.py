@@ -55,6 +55,9 @@ class IterativeExplainer(Explainer):
     history_only: bool = False
     """If True, only show previous explanations (and scores if enabled), no examples."""
 
+    allow_tp_examples: bool = True
+    """If False, suppress TP examples even when available."""
+
     def _to_string_examples(
         self, examples: list[Examples], show_activations: bool
     ) -> str:
@@ -146,7 +149,10 @@ class IterativeExplainer(Explainer):
             # and the extra examples
             normal_examples = self._to_string_examples(examples, self.activations)
 
-            extra_examples_list = record.extra_examples or []
+            extra_examples_list = (record.extra_examples or [])[
+                : self.iterative_max_num_false_positives
+                + self.iterative_max_num_false_negatives
+            ]
             false_positives, false_negatives = self._get_false_positives_and_negatives(
                 extra_examples_list
             )
@@ -168,8 +174,14 @@ class IterativeExplainer(Explainer):
             )
 
             # Optionally include TP/TN examples attached to the record
-            tp_examples_list = getattr(record, "tp_examples_for_prompt", []) or []
-            tn_examples_list = getattr(record, "tn_examples_for_prompt", []) or []
+            tp_examples_list = (getattr(record, "tp_examples_for_prompt", []) or [])[
+                : self.iterative_max_num_true_positives
+            ]
+            tn_examples_list = (getattr(record, "tn_examples_for_prompt", []) or [])[
+                : self.iterative_max_num_true_negatives
+            ]
+            if not self.allow_tp_examples:
+                tp_examples_list = []
             tp_count = min(self.iterative_max_num_true_positives, len(tp_examples_list))
             tn_count = min(self.iterative_max_num_true_negatives, len(tn_examples_list))
             true_positive_examples = (
@@ -384,7 +396,7 @@ class HillClimbing:
         holdout_non_activating_examples: list[Example],
         test_activating_examples: list[Example],
         test_non_activating_examples: list[Example],
-    ):
+    ) -> tuple[list[ScorerResult], list[ScorerResult]]:
         test_scorer_results = []
         holdout_scorer_results = []
         for scorer_idx, scorer_with_path in enumerate(self.scorers_with_paths):

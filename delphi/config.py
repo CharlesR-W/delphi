@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from multiprocessing import cpu_count
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 from simple_parsing import Serializable, field, list_field
@@ -165,23 +165,8 @@ class RunConfig(Serializable):
     """Scorer methods to score latent explanations. Options are 'fuzz', 'detection', and
     'simulation'."""
 
-    # Number of explanations to generate when using the BestOfK explainer
-    bestofk_num_explanations: Optional[int] = field(default=3)
-
-    # Number of iterative refinement rounds when using the Iterative explainer
-    iterative_num_rounds: Optional[int] = field(default=3)
-
-    explainer_temperature: Optional[float] = field(default=0.0)
+    explainer_temperature: float = field(default=0.0)
     """Temperature for generation."""
-
-    judge_scorer_index: Optional[int] = field(default=0)
-    """Index of the scorer to use for judging the iterative explanation."""
-
-    bestofk_return_only_best: Optional[bool] = field(default=True)
-    """Whether to return only the best explanation."""
-
-    bestofk_run_all_scorers: Optional[bool] = field(default=True)
-    """Whether to run all scorers."""
 
     name: str = ""
     """The name of the run. Results are saved in a directory with this name."""
@@ -234,7 +219,6 @@ class RunConfig(Serializable):
         choices=["cache", "neighbours", "scores"],
         default=[],
     )
-
     """List of run stages to recompute. This is a debugging tool
     and may be removed in the future."""
 
@@ -243,51 +227,66 @@ class RunConfig(Serializable):
     )
     """Port to use for the vLLM server."""
 
-    iterative_append_round_to_prompt: Optional[bool] = field(default=False)
-    """Whether to append the round number to the prompt to encourage diversity."""
+    # BestOfK-specific configuration
+    bestofk_num_explanations: int = field(default=3)
+    """Number of explanations to generate when using the BestOfK explainer."""
+
+    bestofk_judge_scorer_index: int = field(default=0)
+    """Index of the scorer to use for selecting the best explanation in BestOfK."""
+
+    bestofk_return_only_best: bool = field(default=True)
+    """Whether to return only the best explanation or all explanations."""
+
+    bestofk_run_all_scorers: bool = field(default=True)
+    """Whether to run all scorers on all explanations or just the judge scorer."""
+
+    bestofk_is_multishot: bool = field(default=True)
+    """Whether to generate multiple explanations from multiple prompts (multishot) 
+    or parse multiple from a single prompt (oneshot)."""
 
     # Iterative-specific configuration
-    iterative_num_rounds: Optional[int] = field(default=3)
+    iterative_num_rounds: int = field(default=3)
     """Number of iterative refinement rounds for the iterative explainer."""
 
-    iterative_holdout_ratio_of_total: Optional[float] = field(default=0.1)
+    iterative_holdout_ratio_of_total: float = field(default=0.1)
     """Ratio of total available test/non-activating examples to hold out for final evaluation."""
 
-    iterative_test_ratio_of_nonholdout: Optional[float] = field(default=0.1)
-    """Ratio of total available test/non-activating examples to use as the test set per round."""
+    iterative_test_ratio_of_nonholdout: float = field(default=0.1)
+    """Ratio of non-holdout examples to use as the test set per round."""
 
-    iterative_max_num_false_positives: Optional[int] = field(default=20)
+    iterative_max_num_false_positives: int = field(default=20)
     """Maximum number of false positive extra examples to include when refining prompts."""
 
-    iterative_max_num_false_negatives: Optional[int] = field(default=20)
+    iterative_max_num_false_negatives: int = field(default=20)
     """Maximum number of false negative extra examples to include when refining prompts."""
 
-    # Iterative prompt composition
-    iterative_max_num_true_positives: Optional[int] = field(default=0)
+    iterative_max_num_true_positives: int = field(default=0)
     """Maximum number of true positive extra examples to include when refining prompts."""
 
-    iterative_max_num_true_negatives: Optional[int] = field(default=0)
+    iterative_max_num_true_negatives: int = field(default=0)
     """Maximum number of true negative extra examples to include when refining prompts."""
 
-    # Whether to reveal scores/history to the explainer and what to carry forward
-    iterative_carryforward_strategy: Optional[Literal["best", "last"]] = field(
-        default="last"
-    )
+    iterative_carryforward_strategy: Literal["best", "last"] = field(default="last")
     """When carrying forward explanation text to the next round, use the
     best-so-far (judged on test set) or the last round's explanation."""
 
-    iterative_show_score_to_explainer: Optional[bool] = field(default=False)
+    iterative_allow_tp_examples: bool = field(default=True)
+    """If False, TP examples are omitted from iterative refinement prompts."""
+
+    iterative_show_score_to_explainer: bool = field(default=False)
     """If True, include the previous round's score in the explainer prompt."""
 
-    iterative_history_only: Optional[bool] = field(default=False)
+    iterative_history_only: bool = field(default=False)
     """If True, show only prior explanations (and scores if enabled) to the
     explainer; do not show examples. Overrides other flags."""
 
-    iterative_always_new_train_examples: Optional[bool] = field(default=False)
+    iterative_always_new_train_examples: bool = field(default=False)
     """If True, sample new train/test subsets from the pools each round;
     if False, reuse the same subsets across rounds."""
 
-    iterative_fraction_test_of_test_plus_train: Optional[float] = field(default=0.33)
-    """Fraction of the (train+test) activating pool to allocate to per-round test.
-    The remaining portion is used for per-round train. The activating holdout pool
-    is provided separately via SamplerConfig.n_examples_test (record.test)."""
+    iterative_append_round_to_prompt: bool = field(default=False)
+    """Whether to append the round number to the prompt to encourage diversity."""
+
+    judge_scorer_index: int = field(default=0)
+    """Index of the scorer to use for judging iterative explanations and selecting 
+    the best explanation across rounds."""

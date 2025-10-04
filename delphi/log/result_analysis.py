@@ -2,12 +2,22 @@ import re
 from pathlib import Path
 from typing import Literal, Optional
 
+import matplotlib
+
+matplotlib.use("Agg")  # Use non-interactive backend
+import matplotlib.pyplot as plt
+import numpy as np
 import orjson
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+import seaborn as sns
 import torch
+from scipy.stats import gaussian_kde
 from sklearn.metrics import roc_auc_score, roc_curve
+
+# Set matplotlib style
+sns.set_style("whitegrid")
+plt.rcParams["figure.figsize"] = (10, 6)
+plt.rcParams["figure.dpi"] = 100
 
 
 def plot_firing_vs_f1(
@@ -21,26 +31,21 @@ def plot_firing_vs_f1(
     for module, module_df in latent_df.groupby("module"):
         module_df = module_df.copy()
         module_df["firing_rate"] = module_df["firing_count"] / num_tokens
-        fig = px.scatter(module_df, x="firing_rate", y="f1_score", log_x=True)
-        fig.update_layout(
-            xaxis_title="Firing rate", yaxis_title="F1 score", xaxis_range=[-5.4, 0]
-        )
-        fig.write_image(out_dir / f"{run_label}_{module}_firing_rates.{image_format}")
 
+        output_path = out_dir / f"{run_label}_{module}_firing_rates.{image_format}"
 
-def import_plotly():
-    """Import plotly with mitigiation for MathJax bug."""
-    try:
-        import plotly.express as px  # type: ignore
-        import plotly.io as pio  # type: ignore
-    except ImportError:
-        raise ImportError(
-            "Plotly is not installed.\n"
-            "Please install it using `pip install plotly`, "
-            "or install the `[visualize]` extra."
-        )
-    pio.kaleido.scope.mathjax = None  # https://github.com/plotly/plotly.py/issues/3469
-    return px
+        # Use matplotlib for PNG/PDF
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.scatter(module_df["firing_rate"], module_df["f1_score"], alpha=0.6, s=20)
+        ax.set_xscale("log")
+        ax.set_xlim(10**-5.4, module_df["firing_rate"].max() * 1.1)
+        ax.set_xlabel("Firing rate")
+        ax.set_ylabel("F1 score")
+        ax.set_title(f"{run_label} - {module}")
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.close()
 
 
 def compute_auc(df: pd.DataFrame) -> float | None:
@@ -53,15 +58,26 @@ def compute_auc(df: pd.DataFrame) -> float | None:
 
 
 def plot_accuracy_hist(df: pd.DataFrame, out_dir: Path, image_format: str = "pdf"):
+    """Histogram of accuracy for the BEST explanation per latent."""
     out_dir.mkdir(exist_ok=True, parents=True)
     for label in df["score_type"].unique():
-        fig = px.histogram(
-            df[df["score_type"] == label],
-            x="accuracy",
-            nbins=100,
-            title=f"Accuracy distribution: {label}",
+        output_path = (
+            out_dir / f"best_explanation_{label}_accuracy_histogram.{image_format}"
         )
-        fig.write_image(out_dir / f"{label}_accuracy.{image_format}")
+        subset = df[df["score_type"] == label]
+
+        # Use matplotlib for PNG/PDF
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(subset["accuracy"], bins=100, alpha=0.7, edgecolor="black")
+        ax.set_xlabel("Accuracy")
+        ax.set_ylabel("Count")
+        ax.set_title(
+            f"Accuracy distribution of BEST {label} explanations across latents"
+        )
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.close()
 
 
 def plot_roc_curve(df: pd.DataFrame, out_dir: Path, image_format: str = "pdf"):
@@ -73,19 +89,46 @@ def plot_roc_curve(df: pd.DataFrame, out_dir: Path, image_format: str = "pdf"):
 
     fpr, tpr, _ = roc_curve(valid_df.activating, valid_df.probability)
     auc = roc_auc_score(valid_df.activating, valid_df.probability)
-    fig = go.Figure(
-        data=[
-            go.Scatter(x=fpr, y=tpr, mode="lines", name=f"ROC (AUC={auc:.3f})"),
-            go.Scatter(x=[0, 1], y=[0, 1], mode="lines", line=dict(dash="dash")),
-        ]
-    )
-    fig.update_layout(
-        title="ROC Curve",
-        xaxis_title="FPR",
-        yaxis_title="TPR",
-    )
     out_dir.mkdir(exist_ok=True, parents=True)
-    fig.write_image(out_dir / f"roc_curve.{image_format}")
+    output_path = out_dir / f"roc_curve.{image_format}"
+
+    # Use matplotlib for PNG/PDF
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.plot(fpr, tpr, linewidth=2, label=f"ROC (AUC={auc:.3f})")
+    ax.plot([0, 1], [0, 1], "k--", linewidth=1, label="Random")
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("ROC Curve")
+    ax.legend(loc="lower right")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def plot_weighted_f1_bar(
+    processed_df: pd.DataFrame, out_dir: Path, image_format: str = "pdf"
+) -> None:
+    if processed_df.empty or "weighted_f1" not in processed_df.columns:
+        return
+    safe_df = processed_df.dropna(subset=["weighted_f1"])
+    if safe_df.empty:
+        return
+    out_dir.mkdir(exist_ok=True, parents=True)
+    output_path = out_dir / f"weighted_f1_by_scorer.{image_format}"
+
+    # Use matplotlib for PNG/PDF
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.bar(range(len(safe_df)), safe_df["weighted_f1"], alpha=0.7, edgecolor="black")
+    ax.set_xticks(range(len(safe_df)))
+    ax.set_xticklabels(safe_df["score_type"], rotation=45, ha="right")
+    ax.set_xlabel("Scorer")
+    ax.set_ylabel("Weighted F1")
+    ax.set_title("Weighted F1 by scorer")
+    ax.grid(True, alpha=0.3, axis="y")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close()
 
 
 def compute_confusion(df: pd.DataFrame, threshold: float = 0.5) -> dict:
@@ -281,6 +324,7 @@ def get_agg_metrics(
 
 
 def add_latent_f1(latent_df: pd.DataFrame) -> pd.DataFrame:
+    """Add latent-level F1 scores to the dataframe."""
     f1s = (
         latent_df.groupby(["module", "latent_idx"])
         .apply(
@@ -322,9 +366,15 @@ def load_explanation_scores_per_round(scores_path: Path) -> pd.DataFrame:
         if not scorer_dir.is_dir():
             continue
         multi_dir = scorer_dir / "multi_scores"
-        if not multi_dir.exists():
-            # Not all explainers persist multi_scores (e.g., iterative in some runs)
+        multi_files = list(multi_dir.glob("*.txt"))
+        if not multi_dir.exists() or len(multi_files) == 0:
+            msg = (
+                f"[load_explanation_scores_per_round] No multi_scores "
+                f"found for {scorer_dir.name}, skipping"
+            )
+            print(msg)
             continue
+
         for file in multi_dir.glob("*.txt"):
             try:
                 module, latent_idx, round_idx = _parse_multi_score_filename(file.stem)
@@ -374,137 +424,232 @@ def load_single_score_file(path: Path) -> pd.DataFrame:
     )
 
 
-def plot_round_box_and_bar(
+def plot_box_per_round(
     round_df: pd.DataFrame,
     out_dir: Path,
     run_label: str,
     image_format: str = "pdf",
-    metric: str = "f1_score",
 ) -> None:
-    """Create box (whisker) and mean-with-error bar plots for a metric per round.
-
-    Expects round_df with columns: round, scorer, and the metric (e.g., f1_score).
-    """
+    """Box-and-whisker plot showing score distribution at each round."""
     if round_df.empty:
-        print("No per-round scores found (multi_scores missing). Skipping plots.")
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for scorer, sdf in round_df.groupby("scorer"):
-        # Box (whisker) plot per round
-        fig_box = px.box(
-            sdf,
-            x="round",
-            y=metric,
-            points=False,
-            title=f"{run_label} - {scorer} - {metric} per round",
-        )
-        fig_box.update_layout(xaxis_title="Round", yaxis_title=metric)
-        fig_box.write_image(
-            out_dir / f"{run_label}_{scorer}_{metric}_per_round_box.{image_format}"
-        )
+        output_path = out_dir / f"{scorer}_bnw_perround.{image_format}"
 
-        # Bar with whiskers (mean ± std) per round
-        agg = (
-            sdf.groupby("round")[metric]
-            .agg(["mean", "std"])
-            .reset_index()
-            .rename(columns={"mean": metric})
-        )
-        fig_bar = px.bar(
-            agg,
-            x="round",
-            y=metric,
-            title=f"{run_label} - {scorer} - mean {metric} per round",
-            error_y="std",
-        )
-        fig_bar.update_layout(xaxis_title="Round", yaxis_title=f"mean {metric}")
-        fig_bar.write_image(
-            out_dir / f"{run_label}_{scorer}_{metric}_per_round_bar.{image_format}"
-        )
+        fig, ax = plt.subplots(figsize=(12, 6))
+        rounds = sorted(sdf["round"].unique())
+        data_by_round = [sdf[sdf["round"] == r]["f1_score"].dropna() for r in rounds]
+
+        bp = ax.boxplot(data_by_round, labels=rounds, patch_artist=True)
+        for patch in bp["boxes"]:
+            patch.set_facecolor("lightblue")
+
+        ax.set_xlabel("Round")
+        ax.set_ylabel("F1 Score")
+        ax.set_title(f"F1 Score Distribution by Round - {scorer}")
+        ax.grid(True, alpha=0.3, axis="y")
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"Saved: {output_path}")
 
 
-def plot_best_so_far_box_and_bar(
+def plot_box_running_best(
     round_df: pd.DataFrame,
     out_dir: Path,
     run_label: str,
     image_format: str = "pdf",
-    metric: str = "f1_score",
 ) -> None:
-    """Box and bar plots for the best-so-far metric at each round.
-
-    For each (module, latent_idx), compute best metric up to and including round r,
-    then plot distribution across latents for each r.
-    """
+    """Box-and-whisker plot showing running best score at each round."""
     if round_df.empty:
-        print("No per-round scores found (multi_scores missing). Skipping plots.")
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    best_rows = []
     for scorer, sdf in round_df.groupby("scorer"):
+        # Compute running best for each (module, latent_idx)
+        best_rows = []
         rounds = sorted(sdf["round"].unique())
         for (module, latent_idx), g in sdf.groupby(["module", "latent_idx"]):
-            g_sorted = g.sort_values("round")
-            best_val = None
-            best_map = {}
             for r in rounds:
-                sub = g_sorted[g_sorted["round"] <= r]
-                if sub.empty:
-                    continue
-                current_best = sub[metric].max()
-                best_map[r] = (
-                    current_best if best_val is None else max(best_val, current_best)
-                )
-                best_val = best_map[r]
-            for r, val in best_map.items():
+                best_score = g[g["round"] <= r]["f1_score"].max()
                 best_rows.append(
                     {
                         "module": module,
                         "latent_idx": latent_idx,
                         "round": r,
-                        "scorer": scorer,
-                        metric: val,
+                        "best_f1": best_score,
                     }
                 )
 
-    best_df = pd.DataFrame(best_rows)
-    if best_df.empty:
-        print("No best-so-far data computed. Skipping plots.")
+        best_df = pd.DataFrame(best_rows)
+        output_path = out_dir / f"{scorer}_bnw_runningbest.{image_format}"
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        data_by_round = [
+            best_df[best_df["round"] == r]["best_f1"].dropna() for r in rounds
+        ]
+
+        bp = ax.boxplot(data_by_round, labels=rounds, patch_artist=True)
+        for patch in bp["boxes"]:
+            patch.set_facecolor("lightgreen")
+
+        ax.set_xlabel("Round")
+        ax.set_ylabel("Best F1 Score (so far)")
+        ax.set_title(f"Running Best F1 Score by Round - {scorer}")
+        ax.grid(True, alpha=0.3, axis="y")
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"Saved: {output_path}")
+
+
+def plot_kde_best_scores(
+    round_df: pd.DataFrame,
+    out_dir: Path,
+    run_label: str,
+    image_format: str = "pdf",
+) -> None:
+    """KDE of best F1 scores with first round and theoretical max."""
+    if round_df.empty:
         return
 
-    for scorer, sdf in best_df.groupby("scorer"):
-        fig_box = px.box(
-            sdf,
-            x="round",
-            y=metric,
-            points=False,
-            title=f"{run_label} - {scorer} - best-so-far {metric} per round",
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for scorer, sdf in round_df.groupby("scorer"):
+        # Get best score for each latent
+        best_scores = sdf.groupby(["module", "latent_idx"])["f1_score"].max().values
+
+        # Get first round scores (minimum round number)
+        min_round = sdf["round"].min()
+        first_round = sdf[sdf["round"] == min_round]["f1_score"].dropna().values
+
+        if len(best_scores) < 2 or len(first_round) < 2:
+            continue
+
+        # Compute KDEs
+        kde_best = gaussian_kde(best_scores, bw_method=0.3)
+        kde_first = gaussian_kde(first_round, bw_method=0.3)
+
+        # Theoretical max distribution from first round
+        x_range = np.linspace(0, 1, 500)
+        first_pdf = kde_first(x_range)
+        first_cdf = np.array([kde_first.integrate_box_1d(0, x) for x in x_range])
+
+        k = sdf["round"].max() + 1  # Number of candidates
+        theoretical_max_pdf = k * first_pdf * (first_cdf ** (k - 1))
+
+        # Plot
+        fig, ax = plt.subplots(figsize=(12, 7))
+
+        best_pdf = kde_best(x_range)
+        best_mean = best_scores.mean()
+        first_mean = first_round.mean()
+        ax.plot(x_range, best_pdf, linewidth=2, label=f"Best (mean={best_mean:.3f})")
+        ax.plot(
+            x_range,
+            first_pdf,
+            linewidth=2,
+            label=f"First round (mean={first_mean:.3f})",
         )
-        fig_box.update_layout(xaxis_title="Round", yaxis_title=metric)
-        fig_box.write_image(
-            out_dir / f"{run_label}_{scorer}_bestsofar_{metric}_box.{image_format}"
+        ax.plot(
+            x_range,
+            theoretical_max_pdf,
+            linewidth=2,
+            linestyle="--",
+            label=f"Theoretical max of {k} IID",
         )
 
-        agg = (
-            sdf.groupby("round")[metric]
-            .agg(["mean", "std"])
-            .reset_index()
-            .rename(columns={"mean": metric})
+        ax.set_xlabel("F1 Score")
+        ax.set_ylabel("Density")
+        ax.set_title(f"F1 Score Distribution - Best Explanations - {scorer}")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        output_path = out_dir / f"{scorer}_f1KDE_bestscores.{image_format}"
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"Saved: {output_path}")
+
+
+def plot_kde_all_scores(
+    round_df: pd.DataFrame,
+    out_dir: Path,
+    run_label: str,
+    image_format: str = "pdf",
+) -> None:
+    """KDE of all F1 scores by round with first and theoretical max."""
+    if round_df.empty:
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for scorer, sdf in round_df.groupby("scorer"):
+        min_round = sdf["round"].min()
+        first_round = sdf[sdf["round"] == min_round]["f1_score"].dropna().values
+
+        if len(first_round) < 2:
+            continue
+
+        fig, ax = plt.subplots(figsize=(12, 7))
+        x_range = np.linspace(0, 1, 500)
+
+        # Plot each round
+        rounds = sorted(sdf["round"].unique())
+        for r in rounds:
+            round_scores = sdf[sdf["round"] == r]["f1_score"].dropna().values
+            if len(round_scores) >= 2:
+                kde_round = gaussian_kde(round_scores, bw_method=0.3)
+                round_pdf = kde_round(x_range)
+                round_mean = round_scores.mean()
+                ax.plot(
+                    x_range,
+                    round_pdf,
+                    linewidth=1.5,
+                    alpha=0.7,
+                    label=f"Round {r} (mean={round_mean:.3f})",
+                )
+
+        # First round (emphasized)
+        kde_first = gaussian_kde(first_round, bw_method=0.3)
+        first_pdf = kde_first(x_range)
+        first_cdf = np.array([kde_first.integrate_box_1d(0, x) for x in x_range])
+        first_mean = first_round.mean()
+        ax.plot(
+            x_range,
+            first_pdf,
+            linewidth=3,
+            color="red",
+            label=f"First round (mean={first_mean:.3f})",
         )
-        fig_bar = px.bar(
-            agg,
-            x="round",
-            y=metric,
-            title=f"{run_label} - {scorer} - best-so-far mean {metric} per round",
-            error_y="std",
+
+        # Theoretical max
+        k = len(rounds)
+        theoretical_max_pdf = k * first_pdf * (first_cdf ** (k - 1))
+        ax.plot(
+            x_range,
+            theoretical_max_pdf,
+            linewidth=2.5,
+            linestyle="--",
+            color="black",
+            label=f"Theoretical max of {k} IID",
         )
-        fig_bar.update_layout(xaxis_title="Round", yaxis_title=f"mean {metric}")
-        fig_bar.write_image(
-            out_dir / f"{run_label}_{scorer}_bestsofar_{metric}_bar.{image_format}"
-        )
+
+        ax.set_xlabel("F1 Score")
+        ax.set_ylabel("Density")
+        ax.set_title(f"F1 Score Distribution - All Rounds - {scorer}")
+        ax.legend(fontsize=8, ncol=2)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        output_path = out_dir / f"{scorer}_f1KDE_allscores.{image_format}"
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"Saved: {output_path}")
 
 
 def analyze_explainer_rounds(
@@ -512,19 +657,21 @@ def analyze_explainer_rounds(
     out_dir: Path,
     run_label: Optional[str] = None,
     image_format: str = "pdf",
-    metric: str = "f1_score",
 ) -> None:
-    """Convenience wrapper: load per-round scores and emit both plots.
-
-    This expects per-explanation scores saved under scores/*/multi_scores as JSON
-    (the format produced when best-of-k writes multi_scores). For iterative runs,
-    ensure per-round scores are persisted similarly to enable these plots.
-    """
+    """Load per-round scores and generate all round-based plots."""
     if run_label is None:
         run_label = scores_path.name
+
     round_df = load_explanation_scores_per_round(scores_path)
-    plot_round_box_and_bar(round_df, out_dir, run_label, image_format, metric)
-    plot_best_so_far_box_and_bar(round_df, out_dir, run_label, image_format, metric)
+    if round_df.empty:
+        print("No per-round scores found. Skipping round-based plots.")
+        return
+
+    # Generate all 4 plot types
+    plot_kde_best_scores(round_df, out_dir, run_label, image_format)
+    plot_kde_all_scores(round_df, out_dir, run_label, image_format)
+    plot_box_running_best(round_df, out_dir, run_label, image_format)
+    plot_box_per_round(round_df, out_dir, run_label, image_format)
 
 
 def log_results(
@@ -534,8 +681,6 @@ def log_results(
     scorer_names: list[str],
     image_formats: list[Literal["png", "pdf"]] = ["pdf"],
 ):
-    import_plotly()
-
     latent_df, counts = load_data(scores_path, modules)
     latent_df = latent_df[latent_df["score_type"].isin(scorer_names)]
     latent_df = add_latent_f1(latent_df)
@@ -588,6 +733,7 @@ def log_results(
     )
     for image_format in image_formats:
         plot_accuracy_hist(latent_acc_df, viz_path, image_format=image_format)
+        # Skip weighted_f1_bar - user doesn't want this
 
     for score_type in processed_df.score_type.unique():
         score_type_summary = processed_df[processed_df.score_type == score_type].iloc[0]
@@ -652,10 +798,13 @@ def log_results(
 
     if explainer_name in ("bestofk", "iterative"):
         for image_format in image_formats:
-            analyze_explainer_rounds(
-                scores_path,
-                viz_path,
-                run_label=scores_path.name,
-                image_format=image_format,
-                metric="f1_score",
-            )
+            try:
+                analyze_explainer_rounds(
+                    scores_path,
+                    viz_path,
+                    run_label=scores_path.name,
+                    image_format=image_format,
+                )
+            except Exception as e:
+                print(f"Warning: Could not generate round-based plots: {e}")
+                print("This is expected if multi_scores data is missing.")

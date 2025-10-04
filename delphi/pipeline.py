@@ -27,14 +27,20 @@ def process_wrapper(
 
     @wraps(function)
     async def wrapped(input: Any):
+        # print(f"[process_wrapper] Starting {function.__name__}")
         if preprocess is not None:
+            # print(f"[process_wrapper] Applying preprocess to {function.__name__}")
             input = preprocess(input)
 
+        # print(f"[process_wrapper] Calling {function.__name__}")
         results = await function(input)
+        # print(f"[process_wrapper] {function.__name__} completed")
 
         if postprocess is not None:
+            # print(f"[process_wrapper] Applying postprocess to {function.__name__}")
             results = postprocess(results)
 
+        # print(f"[process_wrapper] {function.__name__} finished")
         return results
 
     return wrapped
@@ -96,6 +102,7 @@ class Pipeline:
         Returns:
             list[Any]: The results of all processed items.
         """
+        print(f"[Pipeline] Starting pipeline with max_concurrent={max_concurrent}")
         results = []
         semaphore = asyncio.Semaphore(max_concurrent)
         tasks = set()
@@ -108,6 +115,7 @@ class Pipeline:
             progress_bar.update(1)
             return result
 
+        # Process items
         async for item in self.generate_items():
             number_of_items += 1
             task = asyncio.create_task(process_and_update(item, semaphore))
@@ -137,11 +145,16 @@ class Pipeline:
         Raises:
             TypeError: If the first pipe is neither an async iterable nor a callable.
         """
+        # print(f"[Pipeline] generate_items: loader type = {type(self.loader)}")
         if isinstance(self.loader, AsyncIterable):
+            # print("[Pipeline] generate_items: Using async iterable")
             async for item in self.loader:
+                # print("[Pipeline] generate_items: Yielding item from async iterable")
                 yield item
         elif callable(self.loader):
+            # print("[Pipeline] generate_items: Using callable")
             for item in self.loader():
+                # print("[Pipeline] generate_items: Yielding item from callable")
                 yield item
                 await asyncio.sleep(0)  # Allow other coroutines to run
         else:
@@ -158,11 +171,26 @@ class Pipeline:
         Returns:
             Any: The processed item.
         """
+        # print("[Pipeline] process_item: Acquiring semaphore")
         async with semaphore:
+            # print(
+            # f"[Pipeline] process_item: Semaphore acquired, processing through {len(self.pipes)} pipes"
+            # )
             result = item
-            for pipe in self.pipes:
+            for i, pipe in enumerate(self.pipes):
+                # print(
+                # f"[Pipeline] process_item: Processing through pipe {i + 1}/{len(self.pipes)}"
+                # )
                 if result is not None:
                     result = await pipe(result)
+                    # print(
+                    # f"[Pipeline] process_item: Completed pipe {i + 1}/{len(self.pipes)}"
+                    # )
+
                 else:
+                    # print(
+                    # f"[Pipeline] process_item: Skipping pipe {i + 1}/{len(self.pipes)} (result is None)"
+                    # )
                     pass
+        # print("[Pipeline] process_item: Completed processing, releasing semaphore")
         return result

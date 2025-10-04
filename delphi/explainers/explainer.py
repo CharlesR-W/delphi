@@ -4,14 +4,14 @@ import random
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import aiofiles
 
 from delphi import logger
 
 from ..clients.client import Client, Response
-from ..latents.latents import ActivatingExample, LatentRecord
+from ..latents.latents import LatentRecord
 
 
 class ExplainerResult(NamedTuple):
@@ -20,6 +20,9 @@ class ExplainerResult(NamedTuple):
 
     explanation: str
     """Generated explanation for latent."""
+
+    explanation_id: Optional[int] = 0
+    """The id of the explanation; used for explainers which produce multiple explanations."""
 
 
 @dataclass
