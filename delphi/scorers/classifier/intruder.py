@@ -319,7 +319,6 @@ class IntruderScorer(Classifier):
             # default result is a error
             return IntruderResult()
         else:
-
             try:
                 interpretation, prediction = self._parse(response.text)
             except Exception as e:

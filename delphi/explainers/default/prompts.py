@@ -66,7 +66,7 @@ Your task is to provide a necessary and sufficient explanation that predicts whe
 - If iterating on a given explanation, the examples will be labeled according to type (normal, false-negative, false-positive - e.g. a false-positive example is an example that was incorrectly identified as having the pattern based on the explanation shown,
 - If you are not given a prior explanation, examples will not be labeled and are all normal examples known to activate the pattern.
 - The last line of your response must be the explanation, beginning with "[EXPLANATION]:" followed by the explanation with no line breaks.  Your answer will be processed programmatically so please comply with these rules.
-- Additionally, dictly below, you will be shown a few demonstrations of the task completed - these are to demonstrate the format - the examples for this portion are selected randomly and are NOT related to the pattern you will explain.  The last set of examples is much longer and is that for which you will be asked to generate the explanation.
+- Additionally, directly below, you may be shown a few demonstrations of the task completed - these are to demonstrate the format - the examples for this portion are selected randomly and are NOT related to the pattern you will explain.  The last set of examples is much longer and is that for which you will be asked to generate the explanation.
 
 {prompt}
 """

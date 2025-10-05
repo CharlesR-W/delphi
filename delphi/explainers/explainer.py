@@ -53,19 +53,32 @@ class Explainer(ABC):
             explanation = self.parse_explanation(response.text)
             if self.verbose:
                 logger.info(f"Explanation: {explanation}")
-                logger.info(f"Messages: {messages[-1]['content']}")
+                # Show only first 500 chars of last message to avoid huge logs
+                last_msg = messages[-1]["content"]
+                msg_preview = (
+                    last_msg[:500] + "..." if len(last_msg) > 500 else last_msg
+                )
+                logger.info(f"Messages (preview): {msg_preview}")
                 logger.info(f"Response: {response}")
 
-            return ExplainerResult(record=record, explanation=explanation)
+            # Use explanation_id from record if it exists
+            explanation_id = getattr(record, "explanation_id", None)
+            return ExplainerResult(
+                record=record, explanation=explanation, explanation_id=explanation_id
+            )
         except Exception as e:
             logger.error(f"Explanation parsing failed: {repr(e)}")
+            explanation_id = getattr(record, "explanation_id", None)
             return ExplainerResult(
-                record=record, explanation="Explanation could not be parsed."
+                record=record,
+                explanation="Explanation could not be parsed.",
+                explanation_id=explanation_id,
             )
 
     def parse_explanation(self, text: str) -> str:
         try:
-            match = re.search(r"\[EXPLANATION\]:\s*(.*)", text, re.DOTALL)
+            # Allow optional whitespace before the colon to be more robust
+            match = re.search(r"\[EXPLANATION\]\s*:\s*(.*)", text, re.DOTALL)
             if match:
                 return match.group(1).strip()
             else:

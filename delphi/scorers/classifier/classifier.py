@@ -93,6 +93,23 @@ class Classifier(Scorer):
         """
 
         prompt = self._build_prompt(explanation, batch)
+
+        # Debug: Print the prompt being sent to the scorer
+        print("\n" + "=" * 80)
+        print(f"[SCORER DEBUG] Generating predictions for {len(batch)} samples")
+        print(
+            f"[SCORER DEBUG] Explanation: {explanation[:200]}{'...' if len(explanation) > 200 else ''}"
+        )
+        print("[SCORER DEBUG] Full prompt:")
+        for msg in prompt:
+            print(f"  Role: {msg.get('role', 'unknown')}")
+            content = msg.get("content", "")
+            if len(content) > 500:
+                print(f"  Content (truncated): {content[:500]}...")
+            else:
+                print(f"  Content: {content}")
+        print("=" * 80 + "\n")
+
         if self.log_prob:
             self.generation_kwargs["logprobs"] = True
             self.generation_kwargs["top_logprobs"] = 5
@@ -100,6 +117,7 @@ class Classifier(Scorer):
             response = await self.client.generate(prompt, **self.generation_kwargs)
         except Exception as e:
             logger.error(f"Error generating text: {repr(e)}")
+            print(f"[SCORER ERROR] Failed to generate response: {repr(e)}")
             response = None
         if response is None:
             predictions = [None] * self.n_examples_shown
@@ -108,10 +126,17 @@ class Classifier(Scorer):
             assert isinstance(response, Response)
             selections = response.text
             logprobs = response.logprobs if self.log_prob else None
+
+            # Debug: Print the response
+            print(f"[SCORER DEBUG] Model response: {selections}")
+
             try:
                 predictions, probabilities = self._parse(selections, logprobs)
+                print(f"[SCORER DEBUG] Parsed successfully: predictions={predictions}")
             except Exception as e:
                 logger.error(f"Parsing selections failed: {repr(e)}")
+                print(f"[SCORER ERROR] Failed to parse response: {repr(e)}")
+                print(f"[SCORER ERROR] Response was: {selections}")
                 predictions = [None] * self.n_examples_shown
                 probabilities = [None] * self.n_examples_shown
 
@@ -143,9 +168,30 @@ class Classifier(Scorer):
         pattern = r"\[.*?\]"
         match = re.search(pattern, string)
         if match is None:
-            raise ValueError("No match found in string")
-        predictions: list[bool | Literal[0, 1]] = json.loads(match.group(0))
-        assert len(predictions) == self.n_examples_shown
+            print(
+                f"[SCORER PARSE ERROR] No square brackets found in response: {string}"
+            )
+            raise ValueError(f"No match found in string: {string[:200]}")
+
+        matched_text = match.group(0)
+        print(f"[SCORER DEBUG] Matched text: {matched_text}")
+
+        try:
+            predictions: list[bool | Literal[0, 1]] = json.loads(matched_text)
+        except json.JSONDecodeError as e:
+            print(f"[SCORER PARSE ERROR] JSON decode failed: {e}")
+            print(f"[SCORER PARSE ERROR] Matched text was: {matched_text}")
+            raise
+
+        if len(predictions) != self.n_examples_shown:
+            print(
+                f"[SCORER PARSE ERROR] Expected {self.n_examples_shown} predictions, got {len(predictions)}"
+            )
+            print(f"[SCORER PARSE ERROR] Predictions: {predictions}")
+            raise AssertionError(
+                f"Expected {self.n_examples_shown} predictions, got {len(predictions)}"
+            )
+
         probabilities = (
             self._parse_logprobs(logprobs)
             if logprobs is not None

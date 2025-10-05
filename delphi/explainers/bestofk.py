@@ -91,18 +91,24 @@ class BestOfKExplainer(DefaultExplainer):
 
         try:
             # Convert explanations to ExplainerResult objects
-            explainer_results = []
+            # IMPORTANT: Create a copy of the record for each explanation to avoid
+            # race conditions when setting _explanation_id in scorer_preprocess
+            from dataclasses import replace
+
+            explainer_results: list[ExplainerResult] = []
             for lv, explanation in enumerate(explanations):
                 print(f"[BestOfK] Processing explanation {lv}: {explanation[:100]}...")
+                # Create a shallow copy of the record for this explanation
+                record_copy = replace(record)
                 explainer_results.append(
                     ExplainerResult(
-                        record=record, explanation=explanation, explanation_id=lv
+                        record=record_copy, explanation=explanation, explanation_id=lv
                     )
                 )
         except Exception as e:
             logger.error(f"[bestofk.py:__call__] Explanation parsing failed: {repr(e)}")
             # Create empty results if parsing fails
-            explainer_results = []
+            explainer_results: list[ExplainerResult] = []
 
         print(f"[BestOfK] Created {len(explainer_results)} ExplainerResult objects")
 
@@ -118,23 +124,27 @@ class BestOfKExplainer(DefaultExplainer):
         )
         print(f"[BestOfK] Completed scorer pipeline for latent {record.latent}")
 
-        judge_scorer_results: list[ScorerResult] = scorer_results[
-            self.judge_scorer_index
+        judge_scorer_results: list[ScorerResult] = [
+            s[self.judge_scorer_index] for s in scorer_results
         ]
 
         best_explanation_idx = self._select_best_explanation_idx(
-            judge_scorer_results, explainer_results
+            judge_scorer_results,
+            explainer_results,
         )
         print(f"[BestOfK] Selected best explanation for latent {record.latent}")
 
         # save the best score for all scorers
-        for scorer_idx, scorer_result in enumerate(scorer_results):
-            _, score_dir = self.scorers_with_paths[scorer_idx]
-            self.scorer_postprocess(scorer_result, score_dir=score_dir, is_final=True)
+        for scorer_idx, (scorer, score_dir) in enumerate(self.scorers_with_paths):
+            self.scorer_postprocess(
+                scorer_results[best_explanation_idx][scorer_idx],
+                score_dir=score_dir,
+                is_final=True,
+            )
 
         best_explanation = explainer_results[best_explanation_idx]
         if not self.return_only_best:
-            return best_explanation, explainer_results[best_explanation_idx]
+            return best_explanation, explainer_results
         else:
             return best_explanation
 
@@ -203,12 +213,18 @@ class BestOfKExplainer(DefaultExplainer):
         tp = 0
         fp = 0
         fn = 0
-        for i, sample in enumerate(results):
+        for sample in results:
             if sample.correct:
-                tp += 1
+                if sample.activating:
+                    tp += 1
+                else:
+                    # True negative, not used in F1
+                    pass
             else:
-                fp += 1
-                fn += 1
+                if sample.activating:
+                    fn += 1
+                else:
+                    fp += 1
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0
         f1 = (
@@ -225,30 +241,12 @@ class BestOfKExplainer(DefaultExplainer):
         scorer_results: list[ScorerResult],
         explainer_results: list[ExplainerResult],
     ) -> int:
-        if not explainer_results:
-            logger.error(
-                "[BestOfK] _select_best_explanation called with no explainer_results"
-            )
-            # This should not happen as we check earlier, but handle it gracefully
-            raise ValueError("No explainer results available to select from")
-
-        if not scorer_results:
-            logger.error(
-                "[BestOfK] _select_best_explanation called with no scorer_results, "
-                "returning first explainer result"
-            )
-            # If we have explanations but no scores, just return the first one
-            return 0
-
         f1_scores: list[float] = []
         for score_result in scorer_results:
             f1_score: float = self._compute_f1_score(score_result.score)
             f1_scores.append(f1_score)
         best_idx = max(range(len(f1_scores)), key=lambda i: f1_scores[i])
-        # best_scorer_result = scorer_results[best_idx]
-        # best_explainer_result = explainer_results[best_idx]
 
-        # Return the original ExplainerResult which has the explanation_id preserved
         return best_idx
 
     def _build_prompt(self, record: LatentRecord) -> list[dict[str, str]]:

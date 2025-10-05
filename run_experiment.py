@@ -195,22 +195,14 @@ async def process_cache(
         )
 
     # Builds the record from result returned by the pipeline
-    # Store explanation_id in the record's latent object temporarily for retrieval later
+    # Store explanation_id in the record object temporarily for retrieval later
     def scorer_preprocess(result: ExplainerResult) -> LatentRecord:
-        # Stash the explanation_id on the latent object so we can retrieve it in postprocess
+        # Stash the explanation_id on the record object (not the latent, which is shared!)
         if result.explanation_id is not None:
-            result.record.latent._explanation_id = result.explanation_id
+            result.record._explanation_id = result.explanation_id
+        # Set the explanation on the record so the scorer can access it
+        result.record.explanation = result.explanation
         return result.record
-
-    def format_json_readable(json_str: str) -> str:
-        """Add newlines after closing curly braces to make JSON more readable."""
-        import re
-
-        # Add newline after each closing curly brace
-        formatted = re.sub(
-            r"}", "}\n", json_str.decode() if isinstance(json_str, bytes) else json_str
-        )
-        return formatted
 
     # Saves the score to a file
     def scorer_postprocess(  # Writes per-round scores for bestofk and iterative
@@ -234,20 +226,20 @@ async def process_cache(
                         / f"{safe_latent_name}_{round_idx}.txt"
                     )
                     with open(out_path, "wb") as f:
-                        f.write(format_json_readable(orjson.dumps(res.score)).encode())
+                        f.write(orjson.dumps(res.score))
                     if run_cfg.verbose:
                         print(f"[scorer_postprocess] Wrote multi-score: {out_path}")
             else:
                 # Single result - extract explanation_id that was stashed in scorer_preprocess
                 # The explanation_id tells us which round this is
-                explanation_id = getattr(tmp[0].record.latent, "_explanation_id", 0)
+                explanation_id = getattr(tmp[0].record, "_explanation_id", 0)
                 out_path = (
                     score_dir
                     / "multi_scores"
                     / f"{safe_latent_name}_{explanation_id}.txt"
                 )
                 with open(out_path, "wb") as f:
-                    f.write(format_json_readable(orjson.dumps(result.score)).encode())
+                    f.write(orjson.dumps(result.score))
                 if run_cfg.verbose:
                     print(
                         f"[scorer_postprocess] Wrote single multi-score round {explanation_id}: {out_path}"
@@ -258,7 +250,7 @@ async def process_cache(
                 # For the selected best explanation, also emit a top-level score file
                 out_path = score_dir / f"{safe_latent_name}.txt"
                 with open(out_path, "wb") as f:
-                    f.write(format_json_readable(orjson.dumps(tmp[0].score)).encode())
+                    f.write(orjson.dumps(tmp[0].score))
                 if run_cfg.verbose:
                     print(
                         f"[scorer_postprocess] Wrote iterative FINAL score: {out_path}"
@@ -272,9 +264,7 @@ async def process_cache(
                             / f"{safe_latent_name}_{round_idx}.txt"
                         )
                         with open(out_path, "wb") as f:
-                            f.write(
-                                format_json_readable(orjson.dumps(res.score)).encode()
-                            )
+                            f.write(orjson.dumps(res.score))
                         if run_cfg.verbose:
                             print(
                                 f"[scorer_postprocess] Wrote iterative multi-score: {out_path}"
@@ -287,9 +277,7 @@ async def process_cache(
                         / f"{safe_latent_name}_{round_idx}.txt"
                     )
                     with open(out_path, "wb") as f:
-                        f.write(
-                            format_json_readable(orjson.dumps(result.score)).encode()
-                        )
+                        f.write(orjson.dumps(result.score))
                     if run_cfg.verbose:
                         print(
                             f"[scorer_postprocess] Wrote iterative multi-score: {out_path}"
@@ -298,7 +286,7 @@ async def process_cache(
             assert not isinstance(result, list)
             out_path = score_dir / f"{safe_latent_name}.txt"
             with open(out_path, "wb") as f:
-                f.write(format_json_readable(orjson.dumps(result.score)).encode())
+                f.write(orjson.dumps(result.score))
             if run_cfg.verbose:
                 print(f"[scorer_postprocess] Wrote score: {out_path}")
 
@@ -379,19 +367,7 @@ async def process_cache(
                 if run_cfg.verbose:
                     print(f"[explainer_postprocess] Wrote explanation: {path}")
 
-            if isinstance(explainer_results, tuple):
-                explainer_result, all_explanations = explainer_results
-                # Save all explanations to multi_explanations
-                for round_idx, explanation in enumerate(all_explanations):
-                    filename = f"{explanation.record.latent}_{round_idx}.txt"
-                    write_explanation(
-                        explanation, filename, subdir="multi_explanations"
-                    )
-                # Save the selected explanation as the final one
-                filename = f"{explainer_result.record.latent}.txt"
-                write_explanation(explainer_result, filename)
-                return explainer_results
-            else:
+            if isinstance(explainer_results, ExplainerResult):
                 explainer_result = explainer_results  # single explanation
                 explanation_id = getattr(explainer_result, "explanation_id", None)
 
@@ -406,6 +382,18 @@ async def process_cache(
                         explainer_result, filename, subdir="multi_explanations"
                     )
 
+                return explainer_results
+            else:
+                explainer_result, all_explanations = explainer_results
+                # Save all explanations to multi_explanations
+                for round_idx, explanation in enumerate(all_explanations):
+                    filename = f"{explanation.record.latent}_{round_idx}.txt"
+                    write_explanation(
+                        explanation, filename, subdir="multi_explanations"
+                    )
+                # Save the selected explanation as the final one
+                filename = f"{explainer_result.record.latent}.txt"
+                write_explanation(explainer_result, filename)
                 return explainer_results
 
         if run_cfg.constructor_cfg.non_activating_source == "FAISS":
@@ -423,9 +411,7 @@ async def process_cache(
                 scorer_postprocess=scorer_postprocess,
                 scorer_preprocess=scorer_preprocess,
                 temperature=run_cfg.explainer_temperature,
-                judge_scorer_index=getattr(
-                    run_cfg, "bestofk_judge_scorer_index", run_cfg.judge_scorer_index
-                ),
+                judge_scorer_index=run_cfg.judge_scorer_index,
                 return_only_best=run_cfg.bestofk_return_only_best,
                 run_all_scorers=run_cfg.bestofk_run_all_scorers,
                 is_multishot=run_cfg.bestofk_is_multishot,
@@ -437,7 +423,7 @@ async def process_cache(
                 verbose=run_cfg.verbose,
                 iterative_max_num_false_positives=run_cfg.iterative_max_num_false_positives,
                 iterative_max_num_false_negatives=run_cfg.iterative_max_num_false_negatives,
-                append_round_to_prompt=run_cfg.iterative_append_round_to_prompt,
+                iterative_append_round_to_prompt=run_cfg.iterative_append_round_to_prompt,
                 temperature=run_cfg.explainer_temperature,
                 iterative_max_num_true_positives=getattr(
                     run_cfg, "iterative_max_num_true_positives", 0
@@ -445,31 +431,34 @@ async def process_cache(
                 iterative_max_num_true_negatives=getattr(
                     run_cfg, "iterative_max_num_true_negatives", 0
                 ),
-                show_score_to_explainer=getattr(
+                iterative_show_score_to_explainer=getattr(
                     run_cfg, "iterative_show_score_to_explainer", False
                 ),
-                history_only=getattr(run_cfg, "iterative_history_only", False),
-                allow_tp_examples=getattr(run_cfg, "iterative_allow_tp_examples", True),
+                iterative_history_only=getattr(
+                    run_cfg, "iterative_history_only", False
+                ),
+                iterative_allow_tp_examples=getattr(
+                    run_cfg, "iterative_allow_tp_examples", True
+                ),
             )
             explainer = HillClimbing(
                 scorers_with_paths=scorers_with_paths,
                 scorer_postprocess=scorer_postprocess,
+                explainer_postprocess=explainer_postprocess,
                 explainer=iterative_explainer,
                 iterative_num_rounds=run_cfg.iterative_num_rounds,
                 iterative_holdout_ratio_of_total=run_cfg.iterative_holdout_ratio_of_total,
                 iterative_test_ratio_of_nonholdout=run_cfg.iterative_test_ratio_of_nonholdout,
                 judge_scorer_index=run_cfg.judge_scorer_index,
-                select_strategy=getattr(
+                iterative_carryforward_strategy=getattr(
                     run_cfg, "iterative_carryforward_strategy", "last"
                 ),
-                always_new_train_examples=getattr(
+                iterative_always_new_train_examples=getattr(
                     run_cfg, "iterative_always_new_train_examples", False
                 ),
-                fraction_test_of_test_plus_train=getattr(
-                    run_cfg,
-                    "iterative_fraction_test_of_test_plus_train",
-                    0.33,
-                ),
+            )
+            explainer_postprocess = (
+                None  # since handled internally, already passed to HillClimbing above
             )
         else:
             explainer = DefaultExplainer(
@@ -933,7 +922,7 @@ def default_run_config() -> RunConfig:
         # iterative only
         iterative_num_rounds=5,
         iterative_holdout_ratio_of_total=0.1,
-        iterative_test_ratio_of_nonholdout=0.1,
+        iterative_test_ratio_of_nonholdout=0.75,
         iterative_max_num_false_positives=10,
         iterative_max_num_false_negatives=10,
         iterative_append_round_to_prompt=True,
@@ -945,6 +934,7 @@ def default_run_config() -> RunConfig:
         # Optional TP/TN in prompts
         iterative_max_num_true_positives=0,
         iterative_max_num_true_negatives=0,
+        iterative_allow_tp_examples=True,
     )
 
 

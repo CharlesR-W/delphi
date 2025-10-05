@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, Sequence
 
+import matplotlib.pyplot as plt
+import numpy as np
 import orjson
 import pandas as pd
+from scipy.stats import gaussian_kde
 
 from delphi.config import RunConfig
 from delphi.log.result_analysis import (
     add_latent_f1,
+    compute_classification_metrics,
+    compute_confusion,
     get_agg_metrics,
     load_data,
     log_results,
@@ -22,6 +28,337 @@ if __package__ is None or __package__ == "":
     from run_experiment import ExperimentRunner, default_run_config
 else:  # pragma: no cover
     from .run_experiment import ExperimentRunner, default_run_config
+
+
+# ----------------------
+# Multi-round explanation analysis helper functions
+# ----------------------
+
+
+def _parse_multi_score_filename(stem: str) -> tuple[str, int, int]:
+    """Parse multi-score filename stem into (module, latent_idx, round_idx).
+
+    Expected pattern: "<module>_latent<idx>_<round>"
+    Example: "layers.5_latent0_2" -> ("layers.5", 0, 2)
+    """
+    match = re.match(r"(.+)_latent(\d+)_([0-9]+)$", stem)
+    if not match:
+        raise ValueError(f"Unexpected multi_scores filename pattern: {stem}")
+    module = match.group(1)
+    latent_idx = int(match.group(2))
+    round_idx = int(match.group(3))
+    return module, latent_idx, round_idx
+
+
+def _load_single_score_file(path: Path) -> pd.DataFrame:
+    """Helper to load a single score file to sample-level DataFrame.
+
+    Matches the structure produced by scorer_postprocess (list of dicts per sample).
+    """
+    try:
+        data = orjson.loads(path.read_bytes())
+    except orjson.JSONDecodeError:
+        print(f"Error decoding JSON from {path}. Skipping file.")
+        return pd.DataFrame()
+
+    return pd.DataFrame(
+        [
+            {
+                "text": "".join(ex.get("str_tokens", [])),
+                "activating": ex.get("activating"),
+                "prediction": ex.get("prediction"),
+                "probability": ex.get("probability"),
+                "correct": ex.get("correct"),
+            }
+            for ex in data
+        ]
+    )
+
+
+def _load_explanation_scores_per_round(scores_path: Path) -> pd.DataFrame:
+    """Load per-explanation (per-round) scores from scores/*/multi_scores.
+
+    Returns a DataFrame with columns:
+    - module, latent_idx, round, scorer, f1_score, accuracy, precision, recall
+    """
+    rows = []
+    for scorer_dir in scores_path.iterdir():
+        if not scorer_dir.is_dir():
+            continue
+        multi_dir = scorer_dir / "multi_scores"
+        if not multi_dir.exists():
+            print(
+                f"[load_explanation_scores_per_round] No multi_scores "
+                f"found for {scorer_dir.name}, skipping"
+            )
+            continue
+
+        multi_files = list(multi_dir.glob("*.txt"))
+        if len(multi_files) == 0:
+            print(
+                f"[load_explanation_scores_per_round] multi_scores directory empty "
+                f"for {scorer_dir.name}, skipping"
+            )
+            continue
+
+        for file in multi_files:
+            try:
+                module, latent_idx, round_idx = _parse_multi_score_filename(file.stem)
+            except ValueError as e:
+                print(f"[load_explanation_scores_per_round] Skipping {file.name}: {e}")
+                continue
+
+            df = _load_single_score_file(file)
+            if df.empty:
+                continue
+            conf = compute_confusion(df)
+            metrics = compute_classification_metrics(conf)
+            rows.append(
+                {
+                    "module": module,
+                    "latent_idx": latent_idx,
+                    "round": round_idx,
+                    "scorer": scorer_dir.name,
+                    **metrics,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def _plot_box_per_round(
+    round_df: pd.DataFrame,
+    out_dir: Path,
+    run_label: str,
+    image_format: str = "pdf",
+) -> None:
+    """Box-and-whisker plot showing score distribution at each round."""
+    if round_df.empty:
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for scorer, sdf in round_df.groupby("scorer"):
+        output_path = out_dir / f"{scorer}_bnw_perround.{image_format}"
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        rounds = sorted(sdf["round"].unique())
+        data_by_round = [sdf[sdf["round"] == r]["f1_score"].dropna() for r in rounds]
+
+        bp = ax.boxplot(data_by_round, labels=rounds, patch_artist=True)
+        for patch in bp["boxes"]:
+            patch.set_facecolor("lightblue")
+
+        ax.set_xlabel("Round")
+        ax.set_ylabel("F1 Score")
+        ax.set_title(f"F1 Score Distribution by Round - {scorer}")
+        ax.grid(True, alpha=0.3, axis="y")
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"Saved: {output_path}")
+
+
+def _plot_box_running_best(
+    round_df: pd.DataFrame,
+    out_dir: Path,
+    run_label: str,
+    image_format: str = "pdf",
+) -> None:
+    """Box-and-whisker plot showing running best score at each round."""
+    if round_df.empty:
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for scorer, sdf in round_df.groupby("scorer"):
+        # Compute running best for each (module, latent_idx)
+        best_rows = []
+        rounds = sorted(sdf["round"].unique())
+        for (module, latent_idx), g in sdf.groupby(["module", "latent_idx"]):
+            for r in rounds:
+                best_score = g[g["round"] <= r]["f1_score"].max()
+                best_rows.append(
+                    {
+                        "module": module,
+                        "latent_idx": latent_idx,
+                        "round": r,
+                        "best_f1": best_score,
+                    }
+                )
+
+        best_df = pd.DataFrame(best_rows)
+        output_path = out_dir / f"{scorer}_bnw_runningbest.{image_format}"
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        data_by_round = [
+            best_df[best_df["round"] == r]["best_f1"].dropna() for r in rounds
+        ]
+
+        bp = ax.boxplot(data_by_round, labels=rounds, patch_artist=True)
+        for patch in bp["boxes"]:
+            patch.set_facecolor("lightgreen")
+
+        ax.set_xlabel("Round")
+        ax.set_ylabel("Best F1 Score (so far)")
+        ax.set_title(f"Running Best F1 Score by Round - {scorer}")
+        ax.grid(True, alpha=0.3, axis="y")
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"Saved: {output_path}")
+
+
+def _plot_kde_best_scores(
+    round_df: pd.DataFrame,
+    out_dir: Path,
+    run_label: str,
+    image_format: str = "pdf",
+) -> None:
+    """KDE of best F1 scores with first round and theoretical max."""
+    if round_df.empty:
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for scorer, sdf in round_df.groupby("scorer"):
+        # Get best score for each latent
+        best_scores = sdf.groupby(["module", "latent_idx"])["f1_score"].max().values
+
+        # Get first round scores (minimum round number)
+        min_round = sdf["round"].min()
+        first_round = sdf[sdf["round"] == min_round]["f1_score"].dropna().values
+
+        if len(best_scores) < 2 or len(first_round) < 2:
+            print(
+                f"[plot_kde_best_scores] Insufficient data for {scorer}, skipping KDE"
+            )
+            continue
+
+        # Compute KDEs
+        kde_best = gaussian_kde(best_scores, bw_method=0.3)
+        kde_first = gaussian_kde(first_round, bw_method=0.3)
+
+        # Theoretical max distribution from first round
+        x_range = np.linspace(0, 1, 500)
+        first_pdf = kde_first(x_range)
+        first_cdf = np.array([kde_first.integrate_box_1d(0, x) for x in x_range])
+
+        k = sdf["round"].max() + 1  # Number of candidates
+        theoretical_max_pdf = k * first_pdf * (first_cdf ** (k - 1))
+
+        # Plot
+        fig, ax = plt.subplots(figsize=(12, 7))
+
+        best_pdf = kde_best(x_range)
+        best_mean = best_scores.mean()
+        first_mean = first_round.mean()
+        ax.plot(x_range, best_pdf, linewidth=2, label=f"Best (mean={best_mean:.3f})")
+        ax.plot(
+            x_range,
+            first_pdf,
+            linewidth=2,
+            label=f"First round (mean={first_mean:.3f})",
+        )
+        ax.plot(
+            x_range,
+            theoretical_max_pdf,
+            linewidth=2,
+            linestyle="--",
+            label=f"Theoretical max of {k} IID",
+        )
+
+        ax.set_xlabel("F1 Score")
+        ax.set_ylabel("Density")
+        ax.set_title(f"F1 Score Distribution - Best Explanations - {scorer}")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        output_path = out_dir / f"{scorer}_f1KDE_bestscores.{image_format}"
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"Saved: {output_path}")
+
+
+def _plot_kde_all_scores(
+    round_df: pd.DataFrame,
+    out_dir: Path,
+    run_label: str,
+    image_format: str = "pdf",
+) -> None:
+    """KDE of all F1 scores by round with first and theoretical max."""
+    if round_df.empty:
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for scorer, sdf in round_df.groupby("scorer"):
+        min_round = sdf["round"].min()
+        first_round = sdf[sdf["round"] == min_round]["f1_score"].dropna().values
+
+        if len(first_round) < 2:
+            print(
+                f"[plot_kde_all_scores] Insufficient first-round data for "
+                f"{scorer}, skipping"
+            )
+            continue
+
+        fig, ax = plt.subplots(figsize=(12, 7))
+        x_range = np.linspace(0, 1, 500)
+
+        # Plot each round
+        rounds = sorted(sdf["round"].unique())
+        for r in rounds:
+            round_scores = sdf[sdf["round"] == r]["f1_score"].dropna().values
+            if len(round_scores) >= 2:
+                kde_round = gaussian_kde(round_scores, bw_method=0.3)
+                round_pdf = kde_round(x_range)
+                round_mean = round_scores.mean()
+                ax.plot(
+                    x_range,
+                    round_pdf,
+                    linewidth=1.5,
+                    alpha=0.7,
+                    label=f"Round {r} (mean={round_mean:.3f})",
+                )
+
+        # First round (emphasized)
+        kde_first = gaussian_kde(first_round, bw_method=0.3)
+        first_pdf = kde_first(x_range)
+        first_cdf = np.array([kde_first.integrate_box_1d(0, x) for x in x_range])
+        first_mean = first_round.mean()
+        ax.plot(
+            x_range,
+            first_pdf,
+            linewidth=3,
+            color="red",
+            label=f"First round (mean={first_mean:.3f})",
+        )
+
+        # Theoretical max
+        k = len(rounds)
+        theoretical_max_pdf = k * first_pdf * (first_cdf ** (k - 1))
+        ax.plot(
+            x_range,
+            theoretical_max_pdf,
+            linewidth=2.5,
+            linestyle="--",
+            color="black",
+            label=f"Theoretical max of {k} IID",
+        )
+
+        ax.set_xlabel("F1 Score")
+        ax.set_ylabel("Density")
+        ax.set_title(f"F1 Score Distribution - All Rounds - {scorer}")
+        ax.legend(fontsize=8, ncol=2)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        output_path = out_dir / f"{scorer}_f1KDE_allscores.{image_format}"
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"Saved: {output_path}")
 
 
 class ExperimentDefinition:
@@ -62,6 +399,9 @@ class ExperimentBattery:
         include_tp_tn: bool,
         always_new_train: bool,
         history_only: bool,
+        append_round_to_prompt: bool = True,
+        show_score_to_explainer: bool = False,
+        allow_tp_examples: bool = True,
     ) -> ExperimentDefinition:
         cfg = replace(
             self.base_config,
@@ -71,6 +411,9 @@ class ExperimentBattery:
             iterative_carryforward_strategy=carry,
             iterative_history_only=history_only,
             iterative_always_new_train_examples=always_new_train,
+            iterative_append_round_to_prompt=append_round_to_prompt,
+            iterative_show_score_to_explainer=show_score_to_explainer,
+            iterative_allow_tp_examples=allow_tp_examples,
             name=name,
         )
         cfg = self._apply_feedback_caps(cfg, include_tp_tn)
@@ -87,6 +430,9 @@ class ExperimentBattery:
                 include_tp_tn=True,
                 always_new_train=False,
                 history_only=False,
+                append_round_to_prompt=True,
+                show_score_to_explainer=False,
+                allow_tp_examples=True,
             )
         )
 
@@ -98,6 +444,9 @@ class ExperimentBattery:
                 include_tp_tn=True,
                 always_new_train=False,
                 history_only=False,
+                append_round_to_prompt=True,
+                show_score_to_explainer=False,
+                allow_tp_examples=True,
             )
         )
 
@@ -109,6 +458,9 @@ class ExperimentBattery:
                 include_tp_tn=True,
                 always_new_train=False,
                 history_only=False,
+                append_round_to_prompt=True,
+                show_score_to_explainer=False,
+                allow_tp_examples=True,
             )
         )
 
@@ -120,6 +472,9 @@ class ExperimentBattery:
                 include_tp_tn=True,
                 always_new_train=True,
                 history_only=False,
+                append_round_to_prompt=True,
+                show_score_to_explainer=False,
+                allow_tp_examples=True,
             )
         )
 
@@ -131,6 +486,9 @@ class ExperimentBattery:
                 include_tp_tn=False,
                 always_new_train=False,
                 history_only=False,
+                append_round_to_prompt=True,
+                show_score_to_explainer=False,
+                allow_tp_examples=True,
             )
         )
 
@@ -142,6 +500,9 @@ class ExperimentBattery:
                 include_tp_tn=True,
                 always_new_train=False,
                 history_only=True,
+                append_round_to_prompt=False,  # History-only experiments don't need round tags
+                show_score_to_explainer=True,  # But they do need scores to learn from
+                allow_tp_examples=True,
             )
         )
 
@@ -262,6 +623,7 @@ class ExperimentBattery:
         return orjson.loads(cfg_path.read_bytes())
 
     def plot_runs(self, experiments: Sequence[ExperimentDefinition]) -> None:
+        """Generate standard plots for final results of experiments."""
         for exp in experiments:
             run_dir = self._run_dir(exp.name)
             cfg_dict = self._load_run_config(exp.name)
@@ -281,6 +643,67 @@ class ExperimentBattery:
                 cfg_dict.get("scorers", []),
                 image_formats=["png", "pdf"],
             )
+
+    def plot_multi_round_runs(
+        self, experiments: Sequence[ExperimentDefinition]
+    ) -> None:
+        """Generate multi-round analysis plots for experiments.
+
+        This loads per-round scores from scores/*/multi_scores/ directories
+        and generates plots showing:
+        - F1 score distribution at each round (box plots)
+        - Running best F1 scores over rounds (box plots)
+        - KDE plots of best scores vs first round and theoretical max
+        - KDE plots of all round scores
+        """
+        for exp in experiments:
+            run_dir = self._run_dir(exp.name)
+            cfg_dict = self._load_run_config(exp.name)
+            if cfg_dict is None:
+                continue
+
+            scores_path = run_dir / "scores"
+            visualize_path = run_dir / "visualize"
+
+            if not scores_path.exists():
+                print(
+                    f"[ExperimentBattery] Scores missing for {exp.name}, "
+                    f"skipping multi-round plots"
+                )
+                continue
+
+            print(f"[ExperimentBattery] Loading multi-round data for {exp.name}...")
+            round_df = _load_explanation_scores_per_round(scores_path)
+
+            if round_df.empty:
+                print(
+                    f"[ExperimentBattery] No multi-round scores found for {exp.name}, "
+                    f"skipping multi-round plots"
+                )
+                continue
+
+            print(
+                f"[ExperimentBattery] Loaded {len(round_df)} score records "
+                f"for {exp.name}"
+            )
+            rounds_list = sorted(round_df["round"].unique())
+            print(f"[ExperimentBattery] Rounds found: {rounds_list}")
+            scorers_list = sorted(round_df["scorer"].unique())
+            print(f"[ExperimentBattery] Scorers found: {scorers_list}")
+
+            visualize_path.mkdir(parents=True, exist_ok=True)
+
+            for image_format in ["png", "pdf"]:
+                print(
+                    f"[ExperimentBattery] Generating {image_format} plots "
+                    f"for {exp.name}..."
+                )
+                _plot_kde_best_scores(round_df, visualize_path, exp.name, image_format)
+                _plot_kde_all_scores(round_df, visualize_path, exp.name, image_format)
+                _plot_box_running_best(round_df, visualize_path, exp.name, image_format)
+                _plot_box_per_round(round_df, visualize_path, exp.name, image_format)
+
+            print(f"[ExperimentBattery] Multi-round plots completed for {exp.name}")
 
     def _collect_metrics(
         self, experiments: Sequence[ExperimentDefinition], scorer: str
@@ -392,7 +815,8 @@ class ExperimentBattery:
                     plt.close()
 
                     print(
-                        f"[ExperimentBattery] Saved cross-experiment plot: {output_path}"
+                        f"[ExperimentBattery] Saved cross-experiment plot: "
+                        f"{output_path}"
                     )
 
 
@@ -401,7 +825,7 @@ if __name__ == "__main__":
 
     base_cfg = replace(
         base_cfg,
-        max_latents=10,
+        max_latents=200,
         # name will be set per experiment
     )
 
@@ -414,20 +838,28 @@ if __name__ == "__main__":
 
     # --- Commands (uncommented to run) ---
     # Run Best-of-K baseline experiments with FIXED per-round score writing
-    print("Running Best-of-K experiments...")
-    battery.run(bestofk_experiments)
+    # print("Running Best-of-K experiments...")
+    # battery.run(bestofk_experiments)
 
-    # Plot Best-of-K runs
-    print("Plotting Best-of-K runs...")
-    battery.plot_runs(bestofk_experiments)
+    # Plot Best-of-K runs (final results)
+    # print("Plotting Best-of-K runs (final results)...")
+    # battery.plot_runs(bestofk_experiments)
+
+    # Plot Best-of-K multi-round analysis
+    # print("Plotting Best-of-K multi-round analysis...")
+    # battery.plot_multi_round_runs(bestofk_experiments)
 
     # Run Iterative experiments
     print("Running Iterative experiments...")
     battery.run(iterative_experiments)
 
-    # Plot Iterative runs
-    print("Plotting Iterative runs...")
+    # Plot Iterative runs (final results)
+    print("Plotting Iterative runs (final results)...")
     battery.plot_runs(iterative_experiments)
+
+    # Plot Iterative multi-round analysis
+    print("Plotting Iterative multi-round analysis...")
+    battery.plot_multi_round_runs(iterative_experiments)
 
     # Cross-experiment comparison plots (Best-of-K vs Iterative)
     print("Generating cross-experiment comparison plots...")
