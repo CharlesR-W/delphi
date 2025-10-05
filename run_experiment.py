@@ -948,5 +948,8 @@ if __name__ == "__main__":
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
-    runner = ExperimentRunner()
+    # Use absolute path to ensure consistent results location regardless of cwd
+    # This resolves to the repo root's results/ directory
+    results_dir = (Path(__file__).parent.parent / "results").resolve()
+    runner = ExperimentRunner(base_results_dir=results_dir)
     runner.run(default_run_config())

@@ -829,7 +829,10 @@ if __name__ == "__main__":
         # name will be set per experiment
     )
 
-    runner = ExperimentRunner()
+    # Use absolute path to ensure consistent results location regardless of cwd
+    # This resolves to the repo root's results/ directory
+    results_dir = (Path(__file__).parent.parent / "results").resolve()
+    runner = ExperimentRunner(base_results_dir=results_dir)
     battery = ExperimentBattery(runner, base_cfg)
 
     # --- ORIGINAL EXPERIMENTS (with improved parameters based on debugging) ---
