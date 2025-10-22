@@ -1,4 +1,5 @@
 import asyncio
+import random
 import re
 from functools import partial
 from pathlib import Path
@@ -28,6 +29,7 @@ class BestOfKExplainer(DefaultExplainer):
         run_all_scorers: bool = True,
         generation_kwargs: dict | None = None,
         is_multishot: bool = True,
+        bestofk_num_train_examples: int | None = None,
     ):
         super().__init__(client)
         self.bestofk_num_explanations: int = bestofk_num_explanations
@@ -52,6 +54,8 @@ class BestOfKExplainer(DefaultExplainer):
         """if True, all scorers are run, else only the judge scorer is run."""
         self.generation_kwargs = generation_kwargs or {}
         """Extra keyword arguments passed to the generation client."""
+        self.bestofk_num_train_examples: int | None = bestofk_num_train_examples
+        """Number of train examples to show. If None, shows all available train examples."""
 
     async def __call__(
         self, record: LatentRecord
@@ -133,6 +137,35 @@ class BestOfKExplainer(DefaultExplainer):
             explainer_results,
         )
         print(f"[BestOfK] Selected best explanation for latent {record.latent}")
+        
+        # Spot check logging: write all explanations
+        if hasattr(self, "spot_check_dir") and hasattr(self, "spot_check_mod"):
+            if (hash(str(record.latent)) % int(getattr(self, "spot_check_mod", 100))) == 0:
+                Path(self.spot_check_dir).mkdir(parents=True, exist_ok=True)
+                spot_check_file = Path(self.spot_check_dir) / f"{str(record.latent).replace('/', '--')}_bestofk.txt"
+                with open(spot_check_file, "w") as f:
+                    f.write(f"{'='*80}\n")
+                    f.write(f"ALL EXPLANATIONS ({len(explainer_results)} total)\n")
+                    f.write(f"{'='*80}\n\n")
+                    for i, exp_result in enumerate(explainer_results):
+                        marker = " <-- BEST" if i == best_explanation_idx else ""
+                        f.write(f"--- Explanation {i+1}{marker} ---\n")
+                        f.write(exp_result.explanation)
+                        f.write(f"\n\n")
+                        
+                # Also log scorer results for best
+                scorer_file = Path(self.spot_check_dir) / f"{str(record.latent).replace('/', '--')}_bestofk_scorer.txt"
+                with open(scorer_file, "w") as f:
+                    f.write(f"{'='*80}\n")
+                    f.write(f"BEST EXPLANATION SCORER RESULTS\n")
+                    f.write(f"{'='*80}\n")
+                    best_result = scorer_results[best_explanation_idx][self.judge_scorer_index]
+                    tp = sum(1 for s in best_result.score if s.correct and s.activating)
+                    fp = sum(1 for s in best_result.score if not s.correct and not s.activating)
+                    fn = sum(1 for s in best_result.score if not s.correct and s.activating)
+                    tn = sum(1 for s in best_result.score if s.correct and not s.activating)
+                    f.write(f"TP: {tp}, FP: {fp}, FN: {fn}, TN: {tn}\n")
+                    f.write(f"Total: {len(best_result.score)} examples\n")
 
         # save the best score for all scorers
         for scorer_idx, (scorer, score_dir) in enumerate(self.scorers_with_paths):
@@ -250,8 +283,22 @@ class BestOfKExplainer(DefaultExplainer):
         return best_idx
 
     def _build_prompt(self, record: LatentRecord) -> list[dict[str, str]]:
+        # Sample train examples if limit is set
+        if self.bestofk_num_train_examples is not None and self.bestofk_num_train_examples < len(record.train):
+            sampled_record = LatentRecord(
+                latent=record.latent,
+                train=random.sample(record.train, self.bestofk_num_train_examples),
+                test=record.test,
+                not_active=record.not_active,
+                explanation=record.explanation,
+            )
+            print(f"[BestOfK] Sampled {self.bestofk_num_train_examples} from train pool of {len(record.train)}")
+        else:
+            sampled_record = record
+            print(f"[BestOfK] Using all {len(record.train)} train examples")
+        
         if not self.is_multishot:
-            prompt: list[dict[str, str]] = super()._build_prompt(record)
+            prompt: list[dict[str, str]] = super()._build_prompt(sampled_record)
             prompt[0]["content"] = SYSTEM_BESTOFK
             prompt.append(
                 {
@@ -260,7 +307,7 @@ class BestOfKExplainer(DefaultExplainer):
                 }
             )
         else:
-            prompt: list[dict[str, str]] = super()._build_prompt(record)
+            prompt: list[dict[str, str]] = super()._build_prompt(sampled_record)
         return prompt
 
     def parse_single_explanation(self, text: str) -> str:

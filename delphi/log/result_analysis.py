@@ -5,6 +5,7 @@ import matplotlib
 
 matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
+import numpy as np
 import orjson
 import pandas as pd
 import seaborn as sns
@@ -65,7 +66,9 @@ def plot_accuracy_hist(df: pd.DataFrame, out_dir: Path, image_format: str = "pdf
 
         # Use matplotlib for PNG/PDF
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.hist(subset["accuracy"], bins=100, alpha=0.7, edgecolor="black")
+        # Use 10 bins linearly spaced between 0 and 1
+        bins = np.linspace(0, 1, 11)  # 11 edges = 10 bins
+        ax.hist(subset["accuracy"], bins=bins, alpha=0.7, edgecolor="black")
         ax.set_xlabel("Accuracy")
         ax.set_ylabel("Count")
         ax.set_title(
@@ -120,8 +123,8 @@ def plot_weighted_f1_bar(
     ax.set_xticks(range(len(safe_df)))
     ax.set_xticklabels(safe_df["score_type"], rotation=45, ha="right")
     ax.set_xlabel("Scorer")
-    ax.set_ylabel("Weighted F1")
-    ax.set_title("Weighted F1 by scorer")
+    ax.set_ylabel("Frequency-weighted F1 score")
+    ax.set_title("Frequency-weighted F1 by scorer")
     ax.grid(True, alpha=0.3, axis="y")
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -397,8 +400,8 @@ def log_results(
         score_type_summary = processed_df[processed_df.score_type == score_type].iloc[0]
         print(f"\n--- {score_type.title()} Metrics ---")
         print(f"Class-Balanced Accuracy: {score_type_summary['accuracy']:.3f}")
-        print(f"F1 Score: {score_type_summary['f1_score']:.3f}")
-        print(f"Frequency-Weighted F1 Score: {score_type_summary['weighted_f1']:.3f}")
+        print(f"Frequency-agnostic F1 score: {score_type_summary['f1_score']:.3f}")
+        print(f"Frequency-weighted F1 score: {score_type_summary['weighted_f1']:.3f}")
         print(
             "Note: the frequency-weighted F1 score is computed over each"
             " hookpoint and averaged"

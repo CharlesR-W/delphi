@@ -415,7 +415,11 @@ async def process_cache(
                 return_only_best=run_cfg.bestofk_return_only_best,
                 run_all_scorers=run_cfg.bestofk_run_all_scorers,
                 is_multishot=run_cfg.bestofk_is_multishot,
+                bestofk_num_train_examples=getattr(run_cfg, "bestofk_num_train_examples", None),
             )
+            # Configure spot-check logging
+            setattr(explainer, "spot_check_dir", (scores_path.parent / "spot_check").resolve())
+            setattr(explainer, "spot_check_mod", 100)
         elif run_cfg.explainer == "iterative":
             # Iterative hill-climbing orchestrates explanation + scoring internally
             iterative_explainer = IterativeExplainer(

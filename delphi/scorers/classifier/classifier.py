@@ -94,21 +94,21 @@ class Classifier(Scorer):
 
         prompt = self._build_prompt(explanation, batch)
 
-        # Debug: Print the prompt being sent to the scorer
-        print("\n" + "=" * 80)
-        print(f"[SCORER DEBUG] Generating predictions for {len(batch)} samples")
-        print(
-            f"[SCORER DEBUG] Explanation: {explanation[:200]}{'...' if len(explanation) > 200 else ''}"
-        )
-        print("[SCORER DEBUG] Full prompt:")
-        for msg in prompt:
-            print(f"  Role: {msg.get('role', 'unknown')}")
-            content = msg.get("content", "")
-            if len(content) > 500:
-                print(f"  Content (truncated): {content[:500]}...")
-            else:
-                print(f"  Content: {content}")
-        print("=" * 80 + "\n")
+        if False:
+            print("\n" + "=" * 80)
+            print(f"[SCORER DEBUG] Generating predictions for {len(batch)} samples")
+            print(
+                f"[SCORER DEBUG] Explanation: {explanation[:200]}{'...' if len(explanation) > 200 else ''}"
+            )
+            print("[SCORER DEBUG] Full prompt:")
+            for msg in prompt:
+                print(f"  Role: {msg.get('role', 'unknown')}")
+                content = msg.get("content", "")
+                if len(content) > 500:
+                    print(f"  Content (truncated): {content[:500]}...")
+                else:
+                    print(f"  Content: {content}")
+            print("=" * 80 + "\n")
 
         if self.log_prob:
             self.generation_kwargs["logprobs"] = True

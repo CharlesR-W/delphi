@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -149,9 +150,11 @@ def _plot_box_per_round(
         for patch in bp["boxes"]:
             patch.set_facecolor("lightblue")
 
+        # Titles and labels
+        fig.suptitle("Frequency-agnostic F1 score distribution by round", fontsize=14, fontweight="bold")
+        ax.set_title(run_label, fontsize=12)
         ax.set_xlabel("Round")
-        ax.set_ylabel("F1 Score")
-        ax.set_title(f"F1 Score Distribution by Round - {scorer}")
+        ax.set_ylabel("Frequency-agnostic F1 score")
         ax.grid(True, alpha=0.3, axis="y")
         plt.tight_layout()
         plt.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -199,9 +202,11 @@ def _plot_box_running_best(
         for patch in bp["boxes"]:
             patch.set_facecolor("lightgreen")
 
+        # Titles and labels
+        fig.suptitle("Running best frequency-agnostic F1 score by round", fontsize=14, fontweight="bold")
+        ax.set_title(run_label, fontsize=12)
         ax.set_xlabel("Round")
-        ax.set_ylabel("Best F1 Score (so far)")
-        ax.set_title(f"Running Best F1 Score by Round - {scorer}")
+        ax.set_ylabel("Best frequency-agnostic F1 score (so far)")
         ax.grid(True, alpha=0.3, axis="y")
         plt.tight_layout()
         plt.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -239,13 +244,9 @@ def _plot_kde_best_scores(
         kde_best = gaussian_kde(best_scores, bw_method=0.3)
         kde_first = gaussian_kde(first_round, bw_method=0.3)
 
-        # Theoretical max distribution from first round
+        # Compute plotting range
         x_range = np.linspace(0, 1, 500)
         first_pdf = kde_first(x_range)
-        first_cdf = np.array([kde_first.integrate_box_1d(0, x) for x in x_range])
-
-        k = sdf["round"].max() + 1  # Number of candidates
-        theoretical_max_pdf = k * first_pdf * (first_cdf ** (k - 1))
 
         # Plot
         fig, ax = plt.subplots(figsize=(12, 7))
@@ -260,17 +261,14 @@ def _plot_kde_best_scores(
             linewidth=2,
             label=f"First round (mean={first_mean:.3f})",
         )
-        ax.plot(
-            x_range,
-            theoretical_max_pdf,
-            linewidth=2,
-            linestyle="--",
-            label=f"Theoretical max of {k} IID",
-        )
+        # Commented out theoretical max curve per request
+        # ax.plot(x_range, theoretical_max_pdf, linewidth=2, linestyle="--", label=f"Theoretical max of {k} IID")
 
-        ax.set_xlabel("F1 Score")
+        # Titles and labels
+        fig.suptitle("Frequency-agnostic F1 score densities (best vs first)", fontsize=14, fontweight="bold")
+        ax.set_title(run_label, fontsize=12)
+        ax.set_xlabel("Frequency-agnostic F1 score")
         ax.set_ylabel("Density")
-        ax.set_title(f"F1 Score Distribution - Best Explanations - {scorer}")
         ax.legend()
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -326,7 +324,6 @@ def _plot_kde_all_scores(
         # First round (emphasized)
         kde_first = gaussian_kde(first_round, bw_method=0.3)
         first_pdf = kde_first(x_range)
-        first_cdf = np.array([kde_first.integrate_box_1d(0, x) for x in x_range])
         first_mean = first_round.mean()
         ax.plot(
             x_range,
@@ -335,22 +332,16 @@ def _plot_kde_all_scores(
             color="red",
             label=f"First round (mean={first_mean:.3f})",
         )
+        # Commented out theoretical max curve per request
+        # k = len(rounds)
+        # theoretical_max_pdf = k * first_pdf * (first_cdf ** (k - 1))
+        # ax.plot(x_range, theoretical_max_pdf, linewidth=2.5, linestyle="--", color="black", label=f"Theoretical max of {k} IID")
 
-        # Theoretical max
-        k = len(rounds)
-        theoretical_max_pdf = k * first_pdf * (first_cdf ** (k - 1))
-        ax.plot(
-            x_range,
-            theoretical_max_pdf,
-            linewidth=2.5,
-            linestyle="--",
-            color="black",
-            label=f"Theoretical max of {k} IID",
-        )
-
-        ax.set_xlabel("F1 Score")
+        # Titles and labels
+        fig.suptitle("Frequency-agnostic F1 score densities by round", fontsize=14, fontweight="bold")
+        ax.set_title(run_label, fontsize=12)
+        ax.set_xlabel("Frequency-agnostic F1 score")
         ax.set_ylabel("Density")
-        ax.set_title(f"F1 Score Distribution - All Rounds - {scorer}")
         ax.legend(fontsize=8, ncol=2)
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -517,7 +508,7 @@ class ExperimentBattery:
             judge_scorer_index=self.base_config.scorers.index("fuzz")
             if "fuzz" in self.base_config.scorers
             else 1,
-            name="bestofk_k10_temp0.7_judge_fuzz",
+            name="bestofk_baseline",
         )
         yield ExperimentDefinition(cfg.name, cfg)
 
@@ -525,9 +516,27 @@ class ExperimentBattery:
         cfg_multishot = replace(
             cfg,
             bestofk_is_multishot=False,
-            name="bestofk_k10_temp0.7_judge_fuzz_oneshot",
+            name="bestofk_oneshot",
         )
         yield ExperimentDefinition(cfg_multishot.name, cfg_multishot)
+
+        # Train examples 40 variant
+        cfg_train40 = replace(
+            cfg,
+            sampler_cfg=replace(cfg.sampler_cfg, n_examples_train=40),
+            name="bestofk_train40",
+        )
+        yield ExperimentDefinition(cfg_train40.name, cfg_train40)
+
+    def build_random_baseline(self, source_run: str = "bestofk_baseline") -> Iterable[ExperimentDefinition]:
+        cfg = replace(
+            self.base_config,
+            explainer="bestofk",
+            use_random_baseline=True,
+            random_baseline_source_run=source_run,
+            name=f"bestofk_random-baseline_from-{source_run}",
+        )
+        yield ExperimentDefinition(cfg.name, cfg)
 
     def build_bestofk_debug_grid(self) -> Iterable[ExperimentDefinition]:
         """Temporary debugging experiments with smaller scale and adjusted parameters"""
@@ -614,6 +623,72 @@ class ExperimentBattery:
 
     def _run_dir(self, run_name: str) -> Path:
         return self.results_root / run_name
+
+    def copy_pngs_to_viz(self) -> None:
+        """Copy all PNG files from results/{experiment_names}/visualize/ to viz_pngs/{experiment_names}/"""
+        viz_root = self.results_root / "viz_pngs"
+        viz_root.mkdir(parents=True, exist_ok=True)
+        
+        # Find all experiment directories in results
+        for exp_dir in self.results_root.iterdir():
+            if not exp_dir.is_dir() or exp_dir.name == "viz_pngs" or exp_dir.name == "visualize-cross-experiment":
+                continue
+                
+            visualize_dir = exp_dir / "visualize"
+            if not visualize_dir.exists():
+                print(f"[ExperimentBattery] No visualize directory found for {exp_dir.name}")
+                continue
+                
+            # Create corresponding directory in viz_pngs
+            viz_exp_dir = viz_root / exp_dir.name
+            viz_exp_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Copy all PNG files
+            png_files = list(visualize_dir.glob("*.png"))
+            for png_file in png_files:
+                dest_path = viz_exp_dir / png_file.name
+                shutil.copy2(png_file, dest_path)
+                print(f"[ExperimentBattery] Copied {png_file} to {dest_path}")
+        
+        # Also copy cross-experiment PNGs
+        cross_exp_dir = self.results_root / "visualize-cross-experiment"
+        if cross_exp_dir.exists():
+            viz_cross_dir = viz_root / "cross-experiments"
+            viz_cross_dir.mkdir(parents=True, exist_ok=True)
+            
+            png_files = list(cross_exp_dir.glob("*.png"))
+            for png_file in png_files:
+                dest_path = viz_cross_dir / png_file.name
+                shutil.copy2(png_file, dest_path)
+                print(f"[ExperimentBattery] Copied cross-experiment {png_file} to {dest_path}")
+        
+        print(f"[ExperimentBattery] PNG copying completed. All PNGs copied to {viz_root}")
+
+    def _discover_experiments_from_results(self) -> list[ExperimentDefinition]:
+        """Discover all experiments from the results folder by reading run_config.json files."""
+        experiments = []
+        
+        for exp_dir in self.results_root.iterdir():
+            if not exp_dir.is_dir() or exp_dir.name == "viz_pngs" or exp_dir.name == "visualize-cross-experiment":
+                continue
+                
+            run_config = self._load_run_config(exp_dir.name)
+            if run_config is None:
+                continue
+                
+            # Create a basic RunConfig from the loaded data
+            # We'll use the base_config as a template and update with the loaded data
+            config = replace(
+                self.base_config,
+                name=exp_dir.name,
+                explainer=run_config.get("explainer", "bestofk"),
+                # Add other relevant fields as needed
+            )
+            
+            experiments.append(ExperimentDefinition(exp_dir.name, config))
+            
+        print(f"[ExperimentBattery] Discovered {len(experiments)} experiments from results folder")
+        return experiments
 
     def _load_run_config(self, run_name: str) -> dict | None:
         cfg_path = self._run_dir(run_name) / "run_config.json"
@@ -753,8 +828,8 @@ class ExperimentBattery:
 
     def plot_cross_experiments(
         self,
-        bestofk_experiments: Sequence[ExperimentDefinition],
-        iterative_experiments: Sequence[ExperimentDefinition],
+        bestofk_experiments: Sequence[ExperimentDefinition] = None,
+        iterative_experiments: Sequence[ExperimentDefinition] = None,
         scorers: Sequence[str] = ("fuzz",),
         output_prefix: str = "bestofk_vs_iterative",
     ) -> None:
@@ -762,6 +837,14 @@ class ExperimentBattery:
 
         compare_dir = self.results_root / "visualize-cross-experiment"
         compare_dir.mkdir(parents=True, exist_ok=True)
+
+        # If no experiments provided, discover all experiments from results folder
+        if bestofk_experiments is None or iterative_experiments is None:
+            all_experiments = self._discover_experiments_from_results()
+            if bestofk_experiments is None:
+                bestofk_experiments = [exp for exp in all_experiments if exp.config.explainer == "bestofk"]
+            if iterative_experiments is None:
+                iterative_experiments = [exp for exp in all_experiments if exp.config.explainer == "iterative"]
 
         for scorer in scorers:
             bok_df = self._collect_metrics(bestofk_experiments, scorer)
@@ -798,12 +881,15 @@ class ExperimentBattery:
                         )
 
                     ax.set_xlabel("Experiment", fontsize=12)
-                    ax.set_ylabel(metric.replace("_", " ").title(), fontsize=12)
-                    ax.set_title(
-                        f"{metric.replace('_', ' ').title()} comparison ({scorer})",
-                        fontsize=14,
-                        fontweight="bold",
+                    # Friendly labels for F1 variants
+                    y_label = (
+                        "Frequency-agnostic F1 score" if metric == "f1_score" else "Frequency-weighted F1 score"
                     )
+                    title_label = (
+                        "Frequency-agnostic F1 score comparison" if metric == "f1_score" else "Frequency-weighted F1 score comparison"
+                    )
+                    ax.set_ylabel(y_label, fontsize=12)
+                    ax.set_title(f"{title_label} ({scorer})", fontsize=14, fontweight="bold")
                     ax.set_xticks(metric_df["order"])
                     ax.set_xticklabels(
                         metric_df["run"], rotation=60, ha="right", fontsize=9
@@ -839,18 +925,53 @@ if __name__ == "__main__":
     bestofk_experiments = list(battery.build_bestofk_grid())
     iterative_experiments = list(battery.build_iterative_grid())
 
+    # Random baseline (runs after its source run exists)
+    random_baseline_experiments = list(battery.build_random_baseline("bestofk_baseline"))
+
+    # Easy filter list: include only these experiment names
+    include_names: list[str] = [
+        # "bestofk_baseline",
+        # "bestofk_oneshot",
+        # "bestofk_train40",
+        #"bestofk_random-baseline_from-bestofk_baseline",
+        #"iterative_baseline",
+        #"iterative_rounds10",
+       # "iterative_carry-last",
+        #"iterative_always-new-train",
+        #"iterative_no-tp-tn",
+        #"iterative_history-only",
+        #"iterative_train40",
+    ]
+
+    def _maybe_filter(exps: list[ExperimentDefinition]) -> list[ExperimentDefinition]:
+        return [x for x in exps if x.name in include_names]
+
+    # Print experiment names for easy commenting
+    print("Experiments available:")
+    for x in bestofk_experiments + iterative_experiments + random_baseline_experiments:
+        print(f" - {x.name}")
+
+    bestofk_experiments = _maybe_filter(bestofk_experiments)
+    iterative_experiments = _maybe_filter(iterative_experiments)
+    random_baseline_experiments = _maybe_filter(random_baseline_experiments)
+
     # --- Commands (uncommented to run) ---
-    # Run Best-of-K baseline experiments with FIXED per-round score writing
-    # print("Running Best-of-K experiments...")
-    # battery.run(bestofk_experiments)
+    # Run Best-of-K experiments
+    print("Running Best-of-K experiments...")
+    battery.run(bestofk_experiments)
 
     # Plot Best-of-K runs (final results)
-    # print("Plotting Best-of-K runs (final results)...")
-    # battery.plot_runs(bestofk_experiments)
+    print("Plotting Best-of-K runs (final results)...")
+    battery.plot_runs(bestofk_experiments)
 
     # Plot Best-of-K multi-round analysis
-    # print("Plotting Best-of-K multi-round analysis...")
-    # battery.plot_multi_round_runs(bestofk_experiments)
+    print("Plotting Best-of-K multi-round analysis...")
+    battery.plot_multi_round_runs(bestofk_experiments)
+
+    # Run Random baseline experiments (requires source runs to exist)
+    if random_baseline_experiments:
+        print("Running Random Baseline experiments...")
+        battery.run(random_baseline_experiments)
 
     # Run Iterative experiments
     print("Running Iterative experiments...")
@@ -859,6 +980,8 @@ if __name__ == "__main__":
     # Plot Iterative runs (final results)
     print("Plotting Iterative runs (final results)...")
     battery.plot_runs(iterative_experiments)
+    if random_baseline_experiments:
+        battery.plot_runs(random_baseline_experiments)
 
     # Plot Iterative multi-round analysis
     print("Plotting Iterative multi-round analysis...")
@@ -866,7 +989,11 @@ if __name__ == "__main__":
 
     # Cross-experiment comparison plots (Best-of-K vs Iterative)
     print("Generating cross-experiment comparison plots...")
-    battery.plot_cross_experiments(bestofk_experiments, iterative_experiments)
+    battery.plot_cross_experiments()  # Will discover all experiments automatically
+
+    # Copy all PNGs to viz_pngs folder
+    print("Copying PNGs to viz_pngs folder...")
+    battery.copy_pngs_to_viz()
 
     # --- Commented-out comparison experiments for detection vs fuzz scorer ---
     # Uncomment to run experiments comparing detection vs fuzz as judge scorer

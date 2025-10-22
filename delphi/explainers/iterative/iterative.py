@@ -57,6 +57,9 @@ class IterativeExplainer(Explainer):
 
     iterative_allow_tp_examples: bool = True
     """If False, suppress TP examples even when available."""
+    
+    iterative_num_train_examples_per_round: int = 20
+    """Number of train examples to randomly sample and show each round."""
 
     def _to_string_examples(
         self, examples: list[Examples], show_activations: bool
@@ -291,18 +294,20 @@ class IterativeExplainer(Explainer):
                 pass
 
         print(f"[IterativeExplainer] Built prompt with {len(messages)} messages")
-        if getattr(self, "verbose", False):
-            print(f"[IterativeExplainer] Built prompt with {len(messages)} messages")
-
-        # Debug: Show what gets passed to the LLM
-        for i, msg in enumerate(messages):
-            role = msg.get("role", "unknown")
-            content_preview = (
-                msg.get("content", "")[:200] + "..."
-                if len(msg.get("content", "")) > 200
-                else msg.get("content", "")
-            )
-            print(f"[IterativeExplainer] Message {i}: {role} - '{content_preview}'")
+        
+        # Spot check logging: write prompt
+        if hasattr(self, "spot_check_dir") and hasattr(self, "spot_check_mod"):
+            if hasattr(record, "latent") and (hash(str(record.latent)) % int(getattr(self, "spot_check_mod", 100))) == 0:
+                Path(self.spot_check_dir).mkdir(parents=True, exist_ok=True)
+                round_num = getattr(record, 'explanation_id', 0)
+                spot_check_file = Path(self.spot_check_dir) / f"{str(record.latent).replace('/', '--')}_iterative.txt"
+                mode = "w" if round_num == 0 else "a"
+                with open(spot_check_file, mode) as f:
+                    f.write(f"\n{'='*80}\n")
+                    f.write(f"ROUND {round_num} - PROMPT\n")
+                    f.write(f"{'='*80}\n")
+                    for msg in messages:
+                        f.write(f"[{msg.get('role', 'unknown')}]\n{msg.get('content', '')}\n\n")
 
         return messages
 
@@ -400,46 +405,39 @@ class HillClimbing:
         list[Example],
         list[Example],
     ]:
-        """Split pre-sampled pools into train/test and holdout.
-        Policy: prefer sampler-driven sizes if available on record, else ratio.
-        Expects that upstream sampling produced sufficient pools in record.*
+        """Split record.test into train/test/holdout pools.
+        
+        Train pool: Small pool from which to sample examples to show model each round
+        Test pool: Larger pool used to evaluate explanation and collect FP/FN
+        Holdout pool: Final evaluation set, never shown to model
         """
-        all_activating_test_examples = record.test
-        all_non_activating_test_examples = record.not_active
+        all_activating_examples = list(record.test)
+        all_non_activating_examples = list(record.not_active)
 
-        # Shuffle pools for randomness
-        random.shuffle(all_activating_test_examples)
-        random.shuffle(all_non_activating_test_examples)
+        # Shuffle for randomness
+        random.shuffle(all_activating_examples)
+        random.shuffle(all_non_activating_examples)
 
-        # Determine holdout size from configured ratio
-        held_out_set_size = max(
+        # Split off holdout set first
+        holdout_size = max(
             0,
-            int(
-                len(all_activating_test_examples)
-                * self.iterative_holdout_ratio_of_total
-            ),
+            int(len(all_activating_examples) * self.iterative_holdout_ratio_of_total),
         )
-        holdout_activating_examples = all_activating_test_examples[:held_out_set_size]
-        holdout_non_activating_examples = all_non_activating_test_examples[
-            :held_out_set_size
-        ]
+        holdout_activating_examples = all_activating_examples[:holdout_size]
+        holdout_non_activating_examples = all_non_activating_examples[:holdout_size]
 
-        train_test_activating_examples = all_activating_test_examples[
-            held_out_set_size:
-        ]
-        train_test_non_activating_examples = all_non_activating_test_examples[
-            held_out_set_size:
-        ]
+        # Remaining examples to split between train and test
+        remaining_activating = all_activating_examples[holdout_size:]
+        remaining_non_activating = all_non_activating_examples[holdout_size:]
 
-        # Determine per-round test size from configured ratio
-        train_size = len(train_test_activating_examples) * (
-            1 - self.iterative_test_ratio_of_nonholdout
-        )
-        train_size = int(max(20, train_size))
-        train_activating_examples = train_test_activating_examples[train_size:]
-        train_non_activating_examples = train_test_non_activating_examples[train_size:]
-        test_activating_examples = train_test_activating_examples[:train_size]
-        test_non_activating_examples = train_test_non_activating_examples[:train_size]
+        # Split remaining: test gets test_ratio, train gets (1 - test_ratio)
+        test_size = int(len(remaining_activating) * self.iterative_test_ratio_of_nonholdout)
+        
+        test_activating_examples = remaining_activating[:test_size]
+        test_non_activating_examples = remaining_non_activating[:test_size]
+        train_activating_examples = remaining_activating[test_size:]
+        train_non_activating_examples = remaining_non_activating[test_size:]
+        
         return (
             train_activating_examples,
             train_non_activating_examples,
@@ -491,9 +489,18 @@ class HillClimbing:
     ) -> tuple[
         float, list[Example], ExplainerResult, list[ScorerResult], list[ScorerResult]
     ]:
+        # Sample subset from train pool for this round
+        num_to_show = self.explainer.iterative_num_train_examples_per_round
+        if num_to_show < len(train_activating_examples):
+            sampled_train = random.sample(train_activating_examples, num_to_show)
+            print(f"[Iterative Round {round_idx}] Sampled {num_to_show} from train pool of {len(train_activating_examples)}")
+        else:
+            sampled_train = train_activating_examples
+            print(f"[Iterative Round {round_idx}] Using all {len(train_activating_examples)} train examples")
+        
         train_test_record = LatentRecord(
             latent=record.latent,
-            train=train_activating_examples,
+            train=sampled_train,
             not_active=test_non_activating_examples,
             test=test_activating_examples,
             explanation=record.explanation,
@@ -572,6 +579,16 @@ class HillClimbing:
         )
         self.explainer_postprocess(explanation, is_final=False)
         train_test_record.explanation = explanation.explanation
+        
+        # Spot check logging: write response
+        if hasattr(self, "spot_check_dir") and hasattr(self, "spot_check_mod"):
+            if hasattr(train_test_record, "latent") and (hash(str(train_test_record.latent)) % int(getattr(self, "spot_check_mod", 100))) == 0:
+                spot_check_file = Path(self.spot_check_dir) / f"{str(train_test_record.latent).replace('/', '--')}_iterative.txt"
+                with open(spot_check_file, "a") as f:
+                    f.write(f"ROUND {round_idx} - RESPONSE\n")
+                    f.write(f"{'='*80}\n")
+                    f.write(explanation.explanation)
+                    f.write(f"\n\n")
         # Retry once if the explanation could not be parsed; then continue gracefully
         exp_text = (explanation.explanation).strip()
         if "could not be parsed" in exp_text.lower():
@@ -617,6 +634,24 @@ class HillClimbing:
             test_activating_examples,
             test_non_activating_examples,
         )
+        
+        # Spot check logging: write scorer summary
+        if hasattr(self, "spot_check_dir") and hasattr(self, "spot_check_mod"):
+            if hasattr(train_test_record, "latent") and (hash(str(train_test_record.latent)) % int(getattr(self, "spot_check_mod", 100))) == 0:
+                scorer_file = Path(self.spot_check_dir) / f"{str(train_test_record.latent).replace('/', '--')}_iterative_scorer.txt"
+                mode = "w" if round_idx == 0 else "a"
+                with open(scorer_file, mode) as f:
+                    f.write(f"\n{'='*80}\n")
+                    f.write(f"ROUND {round_idx} - SCORER RESULTS (Holdout)\n")
+                    f.write(f"{'='*80}\n")
+                    judge_result = holdout_scorer_results[self.judge_scorer_index]
+                    # Write summary stats
+                    tp = sum(1 for s in judge_result.score if s.correct and s.activating)
+                    fp = sum(1 for s in judge_result.score if not s.correct and not s.activating)
+                    fn = sum(1 for s in judge_result.score if not s.correct and s.activating)
+                    tn = sum(1 for s in judge_result.score if s.correct and not s.activating)
+                    f.write(f"TP: {tp}, FP: {fp}, FN: {fn}, TN: {tn}\n")
+                    f.write(f"Total: {len(judge_result.score)} examples\n\n")
 
         end_time = time.time()
 

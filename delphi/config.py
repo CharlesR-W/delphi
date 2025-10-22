@@ -8,7 +8,7 @@ from simple_parsing import Serializable, field, list_field
 
 @dataclass
 class SamplerConfig(Serializable):
-    n_examples_train: int = 40
+    n_examples_train: int = 20
     """Target number of activating examples in the train/test pool.
     These are sampled upstream and then split per-round for explainers.
     This is a pool size, not necessarily the exact number shown each round."""
@@ -198,6 +198,11 @@ class RunConfig(Serializable):
     )
     """Number of GPUs to use for explanation and scoring."""
 
+    max_memory_utilization: float = field(
+        default=0.9,
+    )
+    """Maximum memory utilization for the vLLM server. 0.0-1.0.  Used to avoid OOM errors."""
+
     seed: int = field(
         default=22,
     )
@@ -226,6 +231,18 @@ class RunConfig(Serializable):
         default=None,
     )
     """Port to use for the vLLM server."""
+
+    enable_prefix_caching: bool = field(default=True)
+    """Enable prefix caching in vLLM server for improved performance."""
+
+    enforce_eager: bool = field(default=False)
+    """Enforce eager execution in vLLM server (disables CUDA graphs)."""
+
+    use_random_baseline: bool = field(default=False)
+    """If True, Best-of-K/Iterative will load explanations from a prior run at random."""
+
+    random_baseline_source_run: str | None = field(default=None)
+    """When using the random baseline explainer, read explanations from this prior run name."""
 
     # BestOfK-specific configuration
     bestofk_num_explanations: int = field(default=3)

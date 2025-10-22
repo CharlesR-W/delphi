@@ -82,6 +82,8 @@ class Offline(Client):
         self.tokenizer = AutoTokenizer.from_pretrained(model)
         self.batch_size = batch_size
         self.statistics = statistics
+        # Model-specific toggles
+        self._is_qwen = "qwen" in (self.model or "").lower()
 
         if self.statistics:
             self.statistics_path = Path("statistics")
@@ -147,26 +149,38 @@ class Offline(Client):
                 ),
             )
         else:  # OpenAI server
-            tasks = [
-                self.client.chat.completions.create(
-                    model=self.model,
-                    messages=batch,
-                    temperature=getattr(self.sampling_params, "temperature", 0.7),
-                    max_tokens=getattr(self.sampling_params, "max_tokens", 500),
-                    extra_body={
-                        "logprobs": bool(
-                            getattr(self.sampling_params, "logprobs", True)
+            tasks = []
+            for batch in batches:
+                # Build extra_body payload
+                extra_body = {}
+                if getattr(self.sampling_params, "logprobs", None) or getattr(
+                    self.sampling_params, "prompt_logprobs", None
+                ):
+                    extra_body.update(
+                        {
+                            "logprobs": bool(
+                                getattr(self.sampling_params, "logprobs", True)
+                            ),
+                            "prompt_logprobs": bool(
+                                getattr(self.sampling_params, "prompt_logprobs", False)
+                            ),
+                        }
+                    )
+                # For Qwen, explicitly disable thinking via chat_template_kwargs
+                if self._is_qwen:
+                    extra_body["chat_template_kwargs"] = {"enable_thinking": False}
+
+                tasks.append(
+                    self.client.chat.completions.create(
+                        model=self.model,
+                        messages=batch,
+                        temperature=getattr(
+                            self.sampling_params, "temperature", 0.7
                         ),
-                        "prompt_logprobs": bool(
-                            getattr(self.sampling_params, "prompt_logprobs", False)
-                        ),
-                    }
-                    if getattr(self.sampling_params, "logprobs", None)
-                    or getattr(self.sampling_params, "prompt_logprobs", None)
-                    else None,
+                        max_tokens=getattr(self.sampling_params, "max_tokens", 500),
+                        extra_body=extra_body or None,
+                    )
                 )
-                for batch in batches
-            ]
             responses: list[ChatCompletion] = await asyncio.gather(*tasks)
 
         new_response = []
