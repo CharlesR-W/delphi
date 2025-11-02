@@ -89,11 +89,11 @@ class IterativeExplainer(Explainer):
         return highlighted_examples
 
     def _get_false_positives_and_negatives(
-        self, examples: list[Example]
+        self, wrong_examples: list[Example]
     ) -> tuple[list[Example], list[Example]]:
         false_positives = []
         false_negatives = []
-        for example in examples:
+        for example in wrong_examples:
             if example.activations.max() > 0:
                 false_negatives.append(example)
             else:
@@ -170,15 +170,13 @@ class IterativeExplainer(Explainer):
                 f"[IterativeExplainer] Refining existing explanation: '{record.explanation[:100]}{'...' if len(record.explanation) > 100 else ''}'"
             )
 
-            extra_examples_list = (record.extra_examples or [])[
-                : self.iterative_max_num_false_positives
-                + self.iterative_max_num_false_negatives
-            ]
+            extra_examples_list = (record.extra_examples or [])
             false_positives, false_negatives = self._get_false_positives_and_negatives(
                 extra_examples_list
             )
-            # we show at most iterative_max_num_false_positives and
-            # iterative_max_num_false_negatives extra examples of each type
+            # After classifying all, cap what we show for each type
+            false_positives = false_positives[: self.iterative_max_num_false_positives]
+            false_negatives = false_negatives[: self.iterative_max_num_false_negatives]
 
             number_extra_false_positives = min(
                 self.iterative_max_num_false_positives, len(false_positives)
@@ -304,10 +302,14 @@ class IterativeExplainer(Explainer):
                 mode = "w" if round_num == 0 else "a"
                 with open(spot_check_file, mode) as f:
                     f.write(f"\n{'='*80}\n")
-                    f.write(f"ROUND {round_num} - PROMPT\n")
-                    f.write(f"{'='*80}\n")
+                    f.write(f"ROUND {round_num}\n")
+                    f.write(f"{'='*80}\n\n")
+                    f.write("PROMPT:\n")
+                    f.write("-" * 80 + "\n")
                     for msg in messages:
-                        f.write(f"[{msg.get('role', 'unknown')}]\n{msg.get('content', '')}\n\n")
+                        f.write(f"[{msg.get('role', 'unknown').upper()}]\n")
+                        f.write(f"{msg.get('content', '')}\n\n")
+                    f.write("-" * 80 + "\n")
 
         return messages
 
@@ -405,24 +407,40 @@ class HillClimbing:
         list[Example],
         list[Example],
     ]:
-        """Split record.test into train/test/holdout pools.
+        """Split record.examples into non-overlapping train/test/holdout pools.
         
-        Train pool: Small pool from which to sample examples to show model each round
-        Test pool: Larger pool used to evaluate explanation and collect FP/FN
-        Holdout pool: Final evaluation set, never shown to model
+        Uses percentage-based splits controlled by config:
+        - iterative_holdout_ratio_of_total: % of ALL examples for holdout (default 0.1 = 10%)
+        - iterative_test_ratio_of_nonholdout: % of REMAINING for test (default 0.75 = 75%)
+        
+        Example with 80 examples from sampler:
+          holdout = 8 (10% of 80)
+          test = 54 (75% of remaining 72)
+          train = 18 (25% of remaining 72)
+        
+        Pools usage:
+        - Train pool: Small pool to sample examples FROM for showing to model
+        - Test pool: Larger pool for evaluation and collecting FP/FN for refinement
+        - Holdout pool: Final evaluation only, never shown to model
+        
+        Note: We use record.examples (all examples) as the source pool.
         """
-        all_activating_examples = list(record.test)
+        all_activating_examples = list(record.examples)
         all_non_activating_examples = list(record.not_active)
+        
+        # Validate we have enough examples
+        if len(all_activating_examples) < 40:
+            raise ValueError(
+                f"[Iterative] Not enough examples! Got {len(all_activating_examples)} in record.examples, "
+                f"need at least 40. Increase n_examples in sampler config."
+            )
 
         # Shuffle for randomness
         random.shuffle(all_activating_examples)
         random.shuffle(all_non_activating_examples)
 
-        # Split off holdout set first
-        holdout_size = max(
-            0,
-            int(len(all_activating_examples) * self.iterative_holdout_ratio_of_total),
-        )
+        # Split off holdout set first (% of total)
+        holdout_size = int(len(all_activating_examples) * self.iterative_holdout_ratio_of_total)
         holdout_activating_examples = all_activating_examples[:holdout_size]
         holdout_non_activating_examples = all_non_activating_examples[:holdout_size]
 
@@ -430,7 +448,7 @@ class HillClimbing:
         remaining_activating = all_activating_examples[holdout_size:]
         remaining_non_activating = all_non_activating_examples[holdout_size:]
 
-        # Split remaining: test gets test_ratio, train gets (1 - test_ratio)
+        # Split remaining: test gets large portion, train gets small portion
         test_size = int(len(remaining_activating) * self.iterative_test_ratio_of_nonholdout)
         
         test_activating_examples = remaining_activating[:test_size]
@@ -490,10 +508,20 @@ class HillClimbing:
         float, list[Example], ExplainerResult, list[ScorerResult], list[ScorerResult]
     ]:
         # Sample subset from train pool for this round
+        # If always_new_train is False, use seed based on latent to get deterministic samples
+        # If always_new_train is True, resample randomly each round
         num_to_show = self.explainer.iterative_num_train_examples_per_round
         if num_to_show < len(train_activating_examples):
-            sampled_train = random.sample(train_activating_examples, num_to_show)
-            print(f"[Iterative Round {round_idx}] Sampled {num_to_show} from train pool of {len(train_activating_examples)}")
+            if not self.iterative_always_new_train_examples:
+                # Use deterministic seed so same examples each round for this latent
+                rng_state = random.getstate()
+                random.seed(hash(str(record.latent)))
+                sampled_train = random.sample(train_activating_examples, num_to_show)
+                random.setstate(rng_state)
+                print(f"[Iterative Round {round_idx}] Using deterministic {num_to_show} from train pool")
+            else:
+                sampled_train = random.sample(train_activating_examples, num_to_show)
+                print(f"[Iterative Round {round_idx}] Resampled {num_to_show} from train pool (always_new=True)")
         else:
             sampled_train = train_activating_examples
             print(f"[Iterative Round {round_idx}] Using all {len(train_activating_examples)} train examples")
@@ -585,10 +613,11 @@ class HillClimbing:
             if hasattr(train_test_record, "latent") and (hash(str(train_test_record.latent)) % int(getattr(self, "spot_check_mod", 100))) == 0:
                 spot_check_file = Path(self.spot_check_dir) / f"{str(train_test_record.latent).replace('/', '--')}_iterative.txt"
                 with open(spot_check_file, "a") as f:
-                    f.write(f"ROUND {round_idx} - RESPONSE\n")
-                    f.write(f"{'='*80}\n")
+                    f.write("COMPLETION:\n")
+                    f.write("-" * 80 + "\n")
                     f.write(explanation.explanation)
-                    f.write(f"\n\n")
+                    f.write("\n")
+                    f.write("-" * 80 + "\n\n")
         # Retry once if the explanation could not be parsed; then continue gracefully
         exp_text = (explanation.explanation).strip()
         if "could not be parsed" in exp_text.lower():
@@ -793,17 +822,10 @@ class HillClimbing:
         for lv in range(self.iterative_num_rounds):
             print(f"[HillClimbing] Starting round {lv}/{self.iterative_num_rounds}")
 
-            # Control whether to reuse same train/test subsets or resample each round
-            if self.iterative_always_new_train_examples and lv > 0:
-                (
-                    train_activating_examples,
-                    train_non_activating_examples,
-                    test_activating_examples,
-                    test_non_activating_examples,
-                    holdout_activating_examples,
-                    holdout_non_activating_examples,
-                ) = self._split_train_test_holdout(record)
-                print(f"[HillClimbing] Resampled data for round {lv}")
+            # NOTE: iterative_always_new_train_examples controls train pool resampling per-round
+            # If False: same subset from train pool each round (deterministic)
+            # If True: resample different subset from train pool each round (more exploration)
+            # Train/test/holdout pools themselves stay fixed - only the sampling changes
 
             round_results = await self._run_round(
                 round_idx=lv,

@@ -260,6 +260,9 @@ class RunConfig(Serializable):
     bestofk_is_multishot: bool = field(default=True)
     """Whether to generate multiple explanations from multiple prompts (multishot) 
     or parse multiple from a single prompt (oneshot)."""
+    
+    bestofk_num_train_examples: int = field(default=20)
+    """Number of train examples to show to the model in BestOfK. Default 20, can use 40."""
 
     # Iterative-specific configuration
     iterative_num_rounds: int = field(default=3)
@@ -303,6 +306,9 @@ class RunConfig(Serializable):
 
     iterative_append_round_to_prompt: bool = field(default=False)
     """Whether to append the round number to the prompt to encourage diversity."""
+    
+    iterative_num_train_examples_per_round: int = field(default=20)
+    """Number of train examples to show per round in Iterative. Default 20, can use 40."""
 
     judge_scorer_index: int = field(default=0)
     """Index of the scorer to use for judging iterative explanations and selecting 

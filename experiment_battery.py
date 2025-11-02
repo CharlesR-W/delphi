@@ -36,6 +36,50 @@ else:  # pragma: no cover
 # ----------------------
 
 
+def _compute_baseline_metrics(n_pos: int = 100, n_neg: int = 60) -> dict[str, float]:
+    """Compute baseline F1 and accuracy metrics for random guessing strategies.
+    
+    Args:
+        n_pos: Number of positive (activating) examples
+        n_neg: Number of negative (non-activating) examples
+    
+    Returns:
+        Dictionary with baseline metrics:
+        - always_true_f1: F1 score when always predicting positive
+        - always_true_accuracy: Accuracy when always predicting positive
+        - random_f1: F1 score when predicting positive with p = class frequency
+        - random_accuracy: Accuracy when predicting positive with p = class frequency
+    """
+    total = n_pos + n_neg
+    p_pos = n_pos / total
+    
+    # Always predicting true (positive)
+    # TP = n_pos, FP = n_neg, TN = 0, FN = 0
+    always_precision = n_pos / (n_pos + n_neg)
+    always_recall = 1.0
+    always_f1 = 2 * (always_precision * always_recall) / (always_precision + always_recall)
+    always_accuracy = n_pos / total
+    
+    # Random guessing with p = class frequency
+    # Expected values:
+    exp_tp = n_pos * p_pos
+    exp_fp = n_neg * p_pos
+    exp_tn = n_neg * (1 - p_pos)
+    exp_fn = n_pos * (1 - p_pos)
+    
+    random_precision = exp_tp / (exp_tp + exp_fp) if (exp_tp + exp_fp) > 0 else 0
+    random_recall = exp_tp / (exp_tp + exp_fn) if (exp_tp + exp_fn) > 0 else 0
+    random_f1 = 2 * (random_precision * random_recall) / (random_precision + random_recall) if (random_precision + random_recall) > 0 else 0
+    random_accuracy = (exp_tp + exp_tn) / total
+    
+    return {
+        "always_true_f1": always_f1,
+        "always_true_accuracy": always_accuracy,
+        "random_f1": random_f1,
+        "random_accuracy": random_accuracy,
+    }
+
+
 def _parse_multi_score_filename(stem: str) -> tuple[str, int, int]:
     """Parse multi-score filename stem into (module, latent_idx, round_idx).
 
@@ -76,11 +120,17 @@ def _load_single_score_file(path: Path) -> pd.DataFrame:
     )
 
 
-def _load_explanation_scores_per_round(scores_path: Path) -> pd.DataFrame:
+def _load_explanation_scores_per_round(scores_path: Path, max_rounds: int | None = None) -> pd.DataFrame:
     """Load per-explanation (per-round) scores from scores/*/multi_scores.
 
     Returns a DataFrame with columns:
     - module, latent_idx, round, scorer, f1_score, accuracy, precision, recall
+    
+    Args:
+        scores_path: Path to scores directory
+        max_rounds: Optional cap on number of rounds/candidates to load per latent.
+                   If provided, only loads rounds 0 through (max_rounds-1).
+                   Useful for BestOfK to cap at K candidates even if more were generated.
     """
     rows = []
     for scorer_dir in scores_path.iterdir():
@@ -107,6 +157,10 @@ def _load_explanation_scores_per_round(scores_path: Path) -> pd.DataFrame:
                 module, latent_idx, round_idx = _parse_multi_score_filename(file.stem)
             except ValueError as e:
                 print(f"[load_explanation_scores_per_round] Skipping {file.name}: {e}")
+                continue
+
+            # Apply cap if specified (for BestOfK)
+            if max_rounds is not None and round_idx >= max_rounds:
                 continue
 
             df = _load_single_score_file(file)
@@ -138,6 +192,7 @@ def _plot_box_per_round(
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    baselines = _compute_baseline_metrics()
 
     for scorer, sdf in round_df.groupby("scorer"):
         output_path = out_dir / f"{scorer}_bnw_perround.{image_format}"
@@ -150,11 +205,18 @@ def _plot_box_per_round(
         for patch in bp["boxes"]:
             patch.set_facecolor("lightblue")
 
+        # Add baseline reference lines
+        ax.axhline(y=baselines["always_true_f1"], color="gray", linestyle="--", 
+                   linewidth=1, alpha=0.5, label="Always guess positive")
+        ax.axhline(y=baselines["random_f1"], color="dimgray", linestyle=":", 
+                   linewidth=1, alpha=0.5, label="Random (by frequency)")
+
         # Titles and labels
         fig.suptitle("Frequency-agnostic F1 score distribution by round", fontsize=14, fontweight="bold")
         ax.set_title(run_label, fontsize=12)
         ax.set_xlabel("Round")
         ax.set_ylabel("Frequency-agnostic F1 score")
+        ax.legend(loc="best", fontsize=8)
         ax.grid(True, alpha=0.3, axis="y")
         plt.tight_layout()
         plt.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -173,6 +235,7 @@ def _plot_box_running_best(
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    baselines = _compute_baseline_metrics()
 
     for scorer, sdf in round_df.groupby("scorer"):
         # Compute running best for each (module, latent_idx)
@@ -202,11 +265,18 @@ def _plot_box_running_best(
         for patch in bp["boxes"]:
             patch.set_facecolor("lightgreen")
 
+        # Add baseline reference lines
+        ax.axhline(y=baselines["always_true_f1"], color="gray", linestyle="--", 
+                   linewidth=1, alpha=0.5, label="Always guess positive")
+        ax.axhline(y=baselines["random_f1"], color="dimgray", linestyle=":", 
+                   linewidth=1, alpha=0.5, label="Random (by frequency)")
+
         # Titles and labels
         fig.suptitle("Running best frequency-agnostic F1 score by round", fontsize=14, fontweight="bold")
         ax.set_title(run_label, fontsize=12)
         ax.set_xlabel("Round")
         ax.set_ylabel("Best frequency-agnostic F1 score (so far)")
+        ax.legend(loc="best", fontsize=8)
         ax.grid(True, alpha=0.3, axis="y")
         plt.tight_layout()
         plt.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -225,6 +295,7 @@ def _plot_kde_best_scores(
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    baselines = _compute_baseline_metrics()
 
     for scorer, sdf in round_df.groupby("scorer"):
         # Get best score for each latent
@@ -264,12 +335,18 @@ def _plot_kde_best_scores(
         # Commented out theoretical max curve per request
         # ax.plot(x_range, theoretical_max_pdf, linewidth=2, linestyle="--", label=f"Theoretical max of {k} IID")
 
+        # Add baseline reference lines
+        ax.axvline(x=baselines["always_true_f1"], color="gray", linestyle="--", 
+                   linewidth=1, alpha=0.5, label="Always guess positive")
+        ax.axvline(x=baselines["random_f1"], color="dimgray", linestyle=":", 
+                   linewidth=1, alpha=0.5, label="Random (by frequency)")
+
         # Titles and labels
         fig.suptitle("Frequency-agnostic F1 score densities (best vs first)", fontsize=14, fontweight="bold")
         ax.set_title(run_label, fontsize=12)
         ax.set_xlabel("Frequency-agnostic F1 score")
         ax.set_ylabel("Density")
-        ax.legend()
+        ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
 
@@ -290,6 +367,7 @@ def _plot_kde_all_scores(
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    baselines = _compute_baseline_metrics()
 
     for scorer, sdf in round_df.groupby("scorer"):
         min_round = sdf["round"].min()
@@ -325,17 +403,23 @@ def _plot_kde_all_scores(
         kde_first = gaussian_kde(first_round, bw_method=0.3)
         first_pdf = kde_first(x_range)
         first_mean = first_round.mean()
-        ax.plot(
+        """ax.plot(
             x_range,
             first_pdf,
             linewidth=3,
             color="red",
             label=f"First round (mean={first_mean:.3f})",
-        )
+        )"""
         # Commented out theoretical max curve per request
         # k = len(rounds)
         # theoretical_max_pdf = k * first_pdf * (first_cdf ** (k - 1))
         # ax.plot(x_range, theoretical_max_pdf, linewidth=2.5, linestyle="--", color="black", label=f"Theoretical max of {k} IID")
+
+        # Add baseline reference lines
+        ax.axvline(x=baselines["always_true_f1"], color="gray", linestyle="--", 
+                   linewidth=1, alpha=0.5, label="Always guess positive")
+        ax.axvline(x=baselines["random_f1"], color="dimgray", linestyle=":", 
+                   linewidth=1, alpha=0.5, label="Random (by frequency)")
 
         # Titles and labels
         fig.suptitle("Frequency-agnostic F1 score densities by round", fontsize=14, fontweight="bold")
@@ -496,6 +580,30 @@ class ExperimentBattery:
                 allow_tp_examples=True,
             )
         )
+        
+        # Variant with 40 train examples per round
+        # NOTE: Iterative splits record.train (160) into holdout (16), test (108), train (36)
+        # This variant shows 40 examples per round (requires larger n_examples_train)
+        cfg_train40 = self._make_iterative_config(
+            name="iterative_train40",
+            rounds=5,
+            carry="best",
+            include_tp_tn=True,
+            always_new_train=False,
+            history_only=False,
+            append_round_to_prompt=True,
+            show_score_to_explainer=False,
+            allow_tp_examples=True,
+        )
+        cfg_train40 = ExperimentDefinition(
+            cfg_train40.name,
+            replace(
+                cfg_train40.config, 
+                iterative_num_train_examples_per_round=40,
+                sampler_cfg=replace(cfg_train40.config.sampler_cfg, n_examples_train=160)
+            )
+        )
+        experiments.append(cfg_train40)
 
         return experiments
 
@@ -512,18 +620,21 @@ class ExperimentBattery:
         )
         yield ExperimentDefinition(cfg.name, cfg)
 
-        # Add multishot variant
-        cfg_multishot = replace(
+        # Add oneshot variant (single prompt generates all K explanations)
+        cfg_oneshot = replace(
             cfg,
             bestofk_is_multishot=False,
             name="bestofk_oneshot",
         )
-        yield ExperimentDefinition(cfg_multishot.name, cfg_multishot)
+        yield ExperimentDefinition(cfg_oneshot.name, cfg_oneshot)
 
-        # Train examples 40 variant
+        # Variant with 40 train examples shown to model
+        # NOTE: BestOfK splits record.train (80) into train (20) and test (60)
+        # This variant shows 40 examples (requires larger n_examples_train)
         cfg_train40 = replace(
             cfg,
-            sampler_cfg=replace(cfg.sampler_cfg, n_examples_train=40),
+            bestofk_num_train_examples=40,
+            sampler_cfg=replace(cfg.sampler_cfg, n_examples_train=160),  # Need 160 to get train pool of ~40
             name="bestofk_train40",
         )
         yield ExperimentDefinition(cfg_train40.name, cfg_train40)
@@ -748,7 +859,22 @@ class ExperimentBattery:
                 continue
 
             print(f"[ExperimentBattery] Loading multi-round data for {exp.name}...")
-            round_df = _load_explanation_scores_per_round(scores_path)
+            
+            # Determine max_rounds cap based on explainer type
+            max_rounds = None
+            explainer_type = cfg_dict.get("explainer", "default")
+            if explainer_type == "bestofk":
+                # For BestOfK, cap at K candidates
+                max_rounds = cfg_dict.get("bestofk_num_explanations", None)
+                if max_rounds:
+                    print(f"[ExperimentBattery] Capping BestOfK at {max_rounds} candidates")
+            elif explainer_type == "iterative":
+                # For Iterative, cap at num_rounds
+                max_rounds = cfg_dict.get("iterative_num_rounds", None)
+                if max_rounds:
+                    print(f"[ExperimentBattery] Capping Iterative at {max_rounds} rounds")
+            
+            round_df = _load_explanation_scores_per_round(scores_path, max_rounds=max_rounds)
 
             if round_df.empty:
                 print(
@@ -880,6 +1006,14 @@ class ExperimentBattery:
                             marker=marker,
                         )
 
+                    # Add baseline reference lines (only for F1 scores, not weighted)
+                    if metric == "f1_score":
+                        baselines = _compute_baseline_metrics()
+                        ax.axhline(y=baselines["always_true_f1"], color="gray", linestyle="--", 
+                                   linewidth=1, alpha=0.5, label="Always guess positive")
+                        ax.axhline(y=baselines["random_f1"], color="dimgray", linestyle=":", 
+                                   linewidth=1, alpha=0.5, label="Random (by frequency)")
+
                     ax.set_xlabel("Experiment", fontsize=12)
                     # Friendly labels for F1 variants
                     y_label = (
@@ -930,18 +1064,21 @@ if __name__ == "__main__":
 
     # Easy filter list: include only these experiment names
     include_names: list[str] = [
-        # "bestofk_baseline",
-        # "bestofk_oneshot",
-        # "bestofk_train40",
-        #"bestofk_random-baseline_from-bestofk_baseline",
-        #"iterative_baseline",
-        #"iterative_rounds10",
-       # "iterative_carry-last",
-        #"iterative_always-new-train",
-        #"iterative_no-tp-tn",
-        #"iterative_history-only",
-        #"iterative_train40",
+        "bestofk_baseline",
+        "bestofk_oneshot",
+        "bestofk_train40",
+        "bestofk_random-baseline_from-bestofk_baseline",
+        "iterative_baseline",
+        "iterative_rounds10",
+        "iterative_carry-last",
+        "iterative_always-new-train",
+        "iterative_no-tp-tn",
+        "iterative_history-only",
+        "iterative_train40",
     ]
+    #include_names = []
+    
+    PLOT_ONLY = True
 
     def _maybe_filter(exps: list[ExperimentDefinition]) -> list[ExperimentDefinition]:
         return [x for x in exps if x.name in include_names]
@@ -958,7 +1095,8 @@ if __name__ == "__main__":
     # --- Commands (uncommented to run) ---
     # Run Best-of-K experiments
     print("Running Best-of-K experiments...")
-    battery.run(bestofk_experiments)
+    if not PLOT_ONLY:
+        battery.run(bestofk_experiments)
 
     # Plot Best-of-K runs (final results)
     print("Plotting Best-of-K runs (final results)...")
@@ -971,11 +1109,13 @@ if __name__ == "__main__":
     # Run Random baseline experiments (requires source runs to exist)
     if random_baseline_experiments:
         print("Running Random Baseline experiments...")
-        battery.run(random_baseline_experiments)
+        if not PLOT_ONLY:
+            battery.run(random_baseline_experiments)
 
     # Run Iterative experiments
     print("Running Iterative experiments...")
-    battery.run(iterative_experiments)
+    if not PLOT_ONLY:
+        battery.run(iterative_experiments)
 
     # Plot Iterative runs (final results)
     print("Plotting Iterative runs (final results)...")

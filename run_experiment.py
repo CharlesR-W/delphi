@@ -217,33 +217,20 @@ async def process_cache(
 
         # For bestofk and iterative (per-round), save all scores to multi_scores folder
         if run_cfg.explainer == "bestofk" and not is_final:
-            # BestOfK can return either a single ScorerResult or a list
-            if isinstance(result, list):
-                for round_idx, res in enumerate(result):
-                    out_path = (
-                        score_dir
-                        / "multi_scores"
-                        / f"{safe_latent_name}_{round_idx}.txt"
-                    )
-                    with open(out_path, "wb") as f:
-                        f.write(orjson.dumps(res.score))
-                    if run_cfg.verbose:
-                        print(f"[scorer_postprocess] Wrote multi-score: {out_path}")
-            else:
-                # Single result - extract explanation_id that was stashed in scorer_preprocess
-                # The explanation_id tells us which round this is
-                explanation_id = getattr(tmp[0].record, "_explanation_id", 0)
-                out_path = (
-                    score_dir
-                    / "multi_scores"
-                    / f"{safe_latent_name}_{explanation_id}.txt"
+            # BestOfK: save all K candidate scores (analogous to iterative rounds)
+            # The explanation_id tells us which candidate this is
+            explanation_id = getattr(tmp[0].record, "_explanation_id", 0)
+            out_path = (
+                score_dir
+                / "multi_scores"
+                / f"{safe_latent_name}_{explanation_id}.txt"
+            )
+            with open(out_path, "wb") as f:
+                f.write(orjson.dumps(result.score))
+            if run_cfg.verbose:
+                print(
+                    f"[scorer_postprocess] Wrote BestOfK candidate score {explanation_id}: {out_path}"
                 )
-                with open(out_path, "wb") as f:
-                    f.write(orjson.dumps(result.score))
-                if run_cfg.verbose:
-                    print(
-                        f"[scorer_postprocess] Wrote single multi-score round {explanation_id}: {out_path}"
-                    )
         elif run_cfg.explainer == "iterative":
             if is_final:
                 assert not isinstance(result, list)  # is_final mustnt give a list
@@ -415,7 +402,9 @@ async def process_cache(
                 return_only_best=run_cfg.bestofk_return_only_best,
                 run_all_scorers=run_cfg.bestofk_run_all_scorers,
                 is_multishot=run_cfg.bestofk_is_multishot,
-                bestofk_num_train_examples=getattr(run_cfg, "bestofk_num_train_examples", None),
+                bestofk_num_train_examples=run_cfg.bestofk_num_train_examples,
+                use_random_baseline=run_cfg.use_random_baseline,
+                random_baseline_source_run=run_cfg.random_baseline_source_run,
             )
             # Configure spot-check logging
             setattr(explainer, "spot_check_dir", (scores_path.parent / "spot_check").resolve())
@@ -444,6 +433,7 @@ async def process_cache(
                 iterative_allow_tp_examples=getattr(
                     run_cfg, "iterative_allow_tp_examples", True
                 ),
+                iterative_num_train_examples_per_round=run_cfg.iterative_num_train_examples_per_round,
             )
             explainer = HillClimbing(
                 scorers_with_paths=scorers_with_paths,
@@ -778,7 +768,7 @@ def start_server_if_not_running(server_port: int, run_cfg: RunConfig):
             "--tensor-parallel-size",
             str(getattr(run_cfg, "num_gpus", torch.cuda.device_count())),
             "--gpu-memory-utilization",
-            str(getattr(run_cfg, "gpu_memory_utilization", 0.9)),
+            str(getattr(run_cfg, "max_memory_utilization", 0.9)),
             "--port",
             str(getattr(run_cfg, "server_port", 8000)),
             "--uvicorn-log-level",
@@ -885,9 +875,25 @@ def default_run_config() -> RunConfig:
     )
 
     sampler_cfg = SamplerConfig(
-        # NB: for now, this split does NOT work for iterative - iterative manages its own train/test/holdout splits
-        n_examples_train=50,  # 200
-        n_examples_test=100,  # 100
+        # NOTE: Sampler samples from record.examples (ALL examples for a latent) to create two pools:
+        #   record.train = n_examples_train examples (sampled using quantiles/top/random)
+        #   record.test = n_examples_test examples (sampled using quantiles)
+        #
+        # How YOUR explainers use these pools (BestOfK and Iterative):
+        #   Both use record.train as their source pool and split it into train/test(/holdout)
+        #   - BestOfK: Splits record.train → train (25%), test (75%)
+        #     Shows ~20 examples (default), scores on rest
+        #   - Iterative: Splits record.train → holdout (10%), test (54%), train (18%)
+        #     Shows ~20 per round, collects FP/FN from test, final eval on holdout
+        #
+        # CRITICAL: Set n_examples_train large enough (80+)!
+        #   With n_train=80:
+        #     BestOfK → train=20, test=60
+        #     Iterative → holdout=8, test=54, train=18
+        #   
+        # record.test is used for non-activating examples (record.not_active) for scoring only
+        n_examples_train=80,  # Source pool for BestOfK and Iterative (must be 40+ for validation)
+        n_examples_test=100,  # Used for non-activating examples in scoring
         n_quantiles=5,
     )
 
@@ -904,7 +910,7 @@ def default_run_config() -> RunConfig:
         sparse_model="EleutherAI/Pythia-160m-SST-k32-32k",
         hookpoints=["layers.5.mlp"],
         # explainer_model="hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
-        explainer_model="Qwen/Qwen2.5-32B-Instruct",
+        explainer_model="Qwen/Qwen3-32B",
         explainer_model_max_len=8192 * 4,
         explainer_provider="offline",
         server_port=8000,  # if set, assumes local server is running.  'None' will start server
@@ -917,6 +923,7 @@ def default_run_config() -> RunConfig:
         verbose=True,
         num_examples_per_scorer_prompt=5,
         explainer_temperature=0.7,
+        enforce_eager=True,  # Disable CUDA graphs (required for stable tensor-parallel inference)
         judge_scorer_index=1,  # used for both bestofk and iterative
         # bestofk only
         bestofk_num_explanations=3,

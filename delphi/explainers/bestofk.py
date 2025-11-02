@@ -4,6 +4,8 @@ import re
 from functools import partial
 from pathlib import Path
 from typing import Callable
+import numpy as np
+import orjson
 
 from delphi import logger
 from delphi.explainers.default.default import DefaultExplainer
@@ -30,6 +32,8 @@ class BestOfKExplainer(DefaultExplainer):
         generation_kwargs: dict | None = None,
         is_multishot: bool = True,
         bestofk_num_train_examples: int | None = None,
+        use_random_baseline: bool = False,
+        random_baseline_source_run: str | None = None,
     ):
         super().__init__(client)
         self.bestofk_num_explanations: int = bestofk_num_explanations
@@ -54,67 +58,169 @@ class BestOfKExplainer(DefaultExplainer):
         """if True, all scorers are run, else only the judge scorer is run."""
         self.generation_kwargs = generation_kwargs or {}
         """Extra keyword arguments passed to the generation client."""
-        self.bestofk_num_train_examples: int | None = bestofk_num_train_examples
-        """Number of train examples to show. If None, shows all available train examples."""
+        self.bestofk_num_train_examples: int | None = bestofk_num_train_examples if bestofk_num_train_examples is not None else 20
+        """Number of train examples to show. Default: 20. Can be increased to 40 if needed."""
+        self.use_random_baseline: bool = use_random_baseline
+        """If True, load explanation from a different latent instead of generating."""
+        self.random_baseline_source_run: str | None = random_baseline_source_run
+        """Name of the run to load random baseline explanations from (under results/)."""
 
     async def __call__(
         self, record: LatentRecord
     ) -> ExplainerResult | tuple[ExplainerResult, list[ExplainerResult]]:
         print(f"[BestOfK] Starting explanation generation for latent {record.latent}")
-        messages = self._build_prompt(record)
-        if self.is_multishot:
-            print(
-                f"[BestOfK] Generating {self.bestofk_num_explanations} explanations (multishot)"
+        
+        # Split record.test into clean train/test pools upfront
+        # (unless using random baseline, which doesn't need this)
+        if not (self.use_random_baseline and self.random_baseline_source_run):
+            train_pool, test_pool = self._split_train_test(record)
+            # Create a record with the clean test split for scoring
+            clean_record = LatentRecord(
+                latent=record.latent,
+                train=train_pool,  # Will be resampled in _build_prompt
+                test=test_pool,
+                not_active=record.not_active,
+                explanation=record.explanation,
             )
-            tasks = []
-            for _ in range(self.bestofk_num_explanations):
-                tasks.append(
-                    self.client.generate(
-                        messages, temperature=self.temperature, **self.generation_kwargs
-                    )
-                )
-            responses = await asyncio.gather(*tasks)
-            # For multishot, we need to combine all responses into a single text
-            combined_text = "\n".join([response.text for response in responses])
-            explanations = self.parse_multiple_explanations(combined_text)
         else:
-            print(
-                f"[BestOfK] Generating {self.bestofk_num_explanations} explanations (oneshot)"
-            )
-            response = await self.client.generate(
-                messages, temperature=self.temperature, **self.generation_kwargs
-            )
-            # Parse multiple explanations from the single response
-            explanations = self.parse_multiple_explanations(response.text)
-
-        print(f"[BestOfK] Parsed {len(explanations)} explanations")
-        if len(explanations) < self.bestofk_num_explanations:
-            print(
-                f"[BestOfK] WARNING: Got {len(explanations)} explanations but expected {self.bestofk_num_explanations}"
-            )
-
-        try:
-            # Convert explanations to ExplainerResult objects
-            # IMPORTANT: Create a copy of the record for each explanation to avoid
-            # race conditions when setting _explanation_id in scorer_preprocess
-            from dataclasses import replace
-
-            explainer_results: list[ExplainerResult] = []
-            for lv, explanation in enumerate(explanations):
-                print(f"[BestOfK] Processing explanation {lv}: {explanation[:100]}...")
-                # Create a shallow copy of the record for this explanation
+            clean_record = record
+        
+        # Random baseline mode: load explanation from a DIFFERENT latent
+        if self.use_random_baseline and self.random_baseline_source_run:
+            try:
+                # Find the source run's explanations directory
+                if self.scorers_with_paths:
+                    current_run_root = self.scorers_with_paths[0][1].parent.parent
+                    results_root = current_run_root.parent
+                else:
+                    results_root = Path.cwd() / "results"
+                
+                prior_dir = (results_root / self.random_baseline_source_run / "explanations").resolve()
+                if not prior_dir.exists():
+                    raise FileNotFoundError(f"Random baseline source not found: {prior_dir}")
+                
+                safe_latent = str(record.latent).replace("/", "--")
+                all_explanation_files = list(prior_dir.glob("*.txt"))
+                # Exclude current latent - want explanation from DIFFERENT latent
+                candidates = [f for f in all_explanation_files if not f.name.startswith(f"{safe_latent}_") and f.name != f"{safe_latent}.txt"]
+                
+                if not candidates:
+                    raise ValueError(f"No other latent explanations found for random baseline")
+                
+                # Pick random explanation from different latent
+                pick = np.random.choice(candidates)
+                explanation_text = orjson.loads(pick.read_bytes())
+                print(f"[BestOfK Random Baseline] Using explanation from {pick.name} for latent {record.latent}")
+                
+                # Spot check logging for random baseline
+                if hasattr(self, "spot_check_dir") and hasattr(self, "spot_check_mod"):
+                    if (hash(str(record.latent)) % int(getattr(self, "spot_check_mod", 100))) == 0:
+                        Path(self.spot_check_dir).mkdir(parents=True, exist_ok=True)
+                        spot_check_file = Path(self.spot_check_dir) / f"{str(record.latent).replace('/', '--')}_bestofk_random_baseline.txt"
+                        with open(spot_check_file, "w") as f:
+                            f.write(f"{'='*80}\n")
+                            f.write(f"RANDOM BASELINE\n")
+                            f.write(f"{'='*80}\n")
+                            f.write(f"Source latent file: {pick.name}\n")
+                            f.write(f"Target latent: {record.latent}\n")
+                            f.write(f"\nExplanation:\n{explanation_text}\n")
+                
+                # Create single explainer result
+                from dataclasses import replace
                 record_copy = replace(record)
-                explainer_results.append(
-                    ExplainerResult(
-                        record=record_copy, explanation=explanation, explanation_id=lv
-                    )
+                explainer_results = [ExplainerResult(record=record_copy, explanation=explanation_text, explanation_id=0)]
+                
+            except Exception as e:
+                logger.error(f"[BestOfK] Random baseline failed: {repr(e)}")
+                from dataclasses import replace
+                record_copy = replace(record)
+                explainer_results = [ExplainerResult(record=record_copy, explanation="[random baseline failed]", explanation_id=0)]
+        else:
+            # Normal explanation generation (use clean_record with split pools)
+            messages = self._build_prompt(clean_record)
+            # Store prompts and responses for spot_check
+            prompts_and_responses = []
+            
+            if self.is_multishot:
+                print(
+                    f"[BestOfK] Generating {self.bestofk_num_explanations} explanations (multishot)"
                 )
-        except Exception as e:
-            logger.error(f"[bestofk.py:__call__] Explanation parsing failed: {repr(e)}")
-            # Create empty results if parsing fails
-            explainer_results: list[ExplainerResult] = []
+                tasks = []
+                for _ in range(self.bestofk_num_explanations):
+                    tasks.append(
+                        self.client.generate(
+                            messages, temperature=self.temperature, **self.generation_kwargs
+                        )
+                    )
+                responses = await asyncio.gather(*tasks)
+                # Store each prompt/response pair
+                for i, response in enumerate(responses):
+                    prompts_and_responses.append({
+                        "prompt": messages,
+                        "response": response.text,
+                        "index": i
+                    })
+                # For multishot, we need to combine all responses into a single text
+                combined_text = "\n".join([response.text for response in responses])
+                explanations = self.parse_multiple_explanations(combined_text)
+            else:
+                print(
+                    f"[BestOfK] Generating {self.bestofk_num_explanations} explanations (oneshot)"
+                )
+                response = await self.client.generate(
+                    messages, temperature=self.temperature, **self.generation_kwargs
+                )
+                # Store single prompt/response
+                prompts_and_responses.append({
+                    "prompt": messages,
+                    "response": response.text,
+                    "index": 0
+                })
+                # Parse multiple explanations from the single response
+                explanations = self.parse_multiple_explanations(response.text)
 
-        print(f"[BestOfK] Created {len(explainer_results)} ExplainerResult objects")
+            print(f"[BestOfK] Parsed {len(explanations)} explanations")
+            if len(explanations) < self.bestofk_num_explanations:
+                print(
+                    f"[BestOfK] WARNING: Got {len(explanations)} explanations but expected {self.bestofk_num_explanations}"
+                )
+            
+            # Enforce hard cap: never process more than requested
+            if len(explanations) > self.bestofk_num_explanations:
+                print(
+                    f"[BestOfK] LIMITING: Truncating {len(explanations)} explanations to {self.bestofk_num_explanations}"
+                )
+                explanations = explanations[:self.bestofk_num_explanations]
+
+            try:
+                # Convert explanations to ExplainerResult objects
+                # IMPORTANT: Create a copy of clean_record for each explanation to avoid
+                # race conditions when setting _explanation_id in scorer_preprocess
+                # Use clean_record so scorers get the clean test split
+                from dataclasses import replace
+
+                explainer_results: list[ExplainerResult] = []
+                for lv, explanation in enumerate(explanations):
+                    print(f"[BestOfK] Processing explanation {lv}: {explanation[:100]}...")
+                    # Create a shallow copy of the clean_record for this explanation
+                    record_copy = replace(clean_record)
+                    explainer_results.append(
+                        ExplainerResult(
+                            record=record_copy, explanation=explanation, explanation_id=lv
+                        )
+                    )
+            except Exception as e:
+                logger.error(f"[bestofk.py:__call__] Explanation parsing failed: {repr(e)}")
+                # Create empty results if parsing fails
+                explainer_results: list[ExplainerResult] = []
+
+            print(f"[BestOfK] Created {len(explainer_results)} ExplainerResult objects")
+            
+            # Sanity check: ensure we never have more than requested
+            assert len(explainer_results) <= self.bestofk_num_explanations, (
+                f"BUG: Created {len(explainer_results)} explainer results but only expected "
+                f"{self.bestofk_num_explanations}. This should never happen!"
+            )
 
         """if self.verbose:
             logger.info(f"[bestofk.py:__call__] Explanations: {explanations}")
@@ -138,20 +244,46 @@ class BestOfKExplainer(DefaultExplainer):
         )
         print(f"[BestOfK] Selected best explanation for latent {record.latent}")
         
-        # Spot check logging: write all explanations
+        # Spot check logging: write all prompts and responses
         if hasattr(self, "spot_check_dir") and hasattr(self, "spot_check_mod"):
-            if (hash(str(record.latent)) % int(getattr(self, "spot_check_mod", 100))) == 0:
+            if (hash(str(clean_record.latent)) % int(getattr(self, "spot_check_mod", 100))) == 0:
                 Path(self.spot_check_dir).mkdir(parents=True, exist_ok=True)
-                spot_check_file = Path(self.spot_check_dir) / f"{str(record.latent).replace('/', '--')}_bestofk.txt"
+                spot_check_file = Path(self.spot_check_dir) / f"{str(clean_record.latent).replace('/', '--')}_bestofk.txt"
                 with open(spot_check_file, "w") as f:
                     f.write(f"{'='*80}\n")
-                    f.write(f"ALL EXPLANATIONS ({len(explainer_results)} total)\n")
+                    f.write(f"BESTOFK - PROMPTS AND COMPLETIONS\n")
+                    f.write(f"{'='*80}\n")
+                    f.write(f"Data split (from record.examples={len(record.examples)} total):\n")
+                    f.write(f"  Train pool: {len(clean_record.train)} examples (for prompting)\n")
+                    f.write(f"  Test pool: {len(clean_record.test)} examples (for scoring)\n")
+                    f.write(f"  Showing: {self.bestofk_num_train_examples} examples to model\n")
+                    f.write(f"\nGenerated {len(explainer_results)} explanations\n")
+                    f.write(f"Mode: {'multishot' if self.is_multishot else 'oneshot'}\n")
                     f.write(f"{'='*80}\n\n")
-                    for i, exp_result in enumerate(explainer_results):
-                        marker = " <-- BEST" if i == best_explanation_idx else ""
-                        f.write(f"--- Explanation {i+1}{marker} ---\n")
-                        f.write(exp_result.explanation)
-                        f.write(f"\n\n")
+                    
+                    # Write prompts and responses
+                    if prompts_and_responses:
+                        for item in prompts_and_responses:
+                            f.write(f"{'='*80}\n")
+                            f.write(f"GENERATION {item['index'] + 1}\n")
+                            f.write(f"{'='*80}\n\n")
+                            f.write("PROMPT:\n")
+                            f.write("-" * 80 + "\n")
+                            # Format messages as string
+                            for msg in item['prompt']:
+                                f.write(f"[{msg['role'].upper()}]\n")
+                                f.write(f"{msg['content']}\n\n")
+                            f.write("-" * 80 + "\n")
+                            f.write("COMPLETION:\n")
+                            f.write("-" * 80 + "\n")
+                            f.write(f"{item['response']}\n")
+                            f.write("-" * 80 + "\n\n")
+                        
+                        # Also write which one was selected as best
+                        f.write(f"\n{'='*80}\n")
+                        f.write(f"BEST EXPLANATION: #{best_explanation_idx + 1}\n")
+                        f.write(f"{'='*80}\n")
+                        f.write(f"{explainer_results[best_explanation_idx].explanation}\n")
                         
                 # Also log scorer results for best
                 scorer_file = Path(self.spot_check_dir) / f"{str(record.latent).replace('/', '--')}_bestofk_scorer.txt"
@@ -282,20 +414,64 @@ class BestOfKExplainer(DefaultExplainer):
 
         return best_idx
 
-    def _build_prompt(self, record: LatentRecord) -> list[dict[str, str]]:
-        # Sample train examples if limit is set
-        if self.bestofk_num_train_examples is not None and self.bestofk_num_train_examples < len(record.train):
-            sampled_record = LatentRecord(
-                latent=record.latent,
-                train=random.sample(record.train, self.bestofk_num_train_examples),
-                test=record.test,
-                not_active=record.not_active,
-                explanation=record.explanation,
+    def _split_train_test(self, record: LatentRecord) -> tuple[list, list]:
+        """Split record.examples into non-overlapping train/test pools.
+        
+        Similar to Iterative but without holdout.
+        Uses percentage-based split: test gets 75%, train gets 25%.
+        
+        Example with 80 examples from sampler:
+          test = 60 examples (for scoring)
+          train = 20 examples (pool to sample from for prompting)
+        
+        Note: We use record.examples (all examples) as the source pool.
+              Then split it into smaller train (for showing) and test (for scoring).
+        """
+        all_activating_examples = list(record.examples)
+        
+        # Validate we have enough examples
+        if len(all_activating_examples) < 40:
+            raise ValueError(
+                f"[BestOfK] Not enough examples! Got {len(all_activating_examples)} in record.examples, "
+                f"need at least 40. Increase n_examples in sampler config."
             )
-            print(f"[BestOfK] Sampled {self.bestofk_num_train_examples} from train pool of {len(record.train)}")
+        
+        # Shuffle for randomness
+        random.shuffle(all_activating_examples)
+        
+        # Split: test gets 75%, train gets 25%
+        test_size = int(len(all_activating_examples) * 0.75)
+        test_examples = all_activating_examples[:test_size]
+        train_examples = all_activating_examples[test_size:]
+        
+        print(f"[BestOfK] Split record.examples ({len(all_activating_examples)}) → train={len(train_examples)}, test={len(test_examples)}")
+        
+        return train_examples, test_examples
+    
+    def _build_prompt(self, record: LatentRecord) -> list[dict[str, str]]:
+        """Build prompt for explanation generation.
+        
+        Note: record should already have clean train/test split from __call__.
+        This method optionally samples a subset from record.train.
+        """
+        train_pool = record.train
+        
+        # Sample subset from train pool if limit is set
+        if self.bestofk_num_train_examples is not None and self.bestofk_num_train_examples < len(train_pool):
+            sampled_train = random.sample(train_pool, self.bestofk_num_train_examples)
+            print(f"[BestOfK] Sampled {self.bestofk_num_train_examples} from train pool of {len(train_pool)}")
         else:
-            sampled_record = record
-            print(f"[BestOfK] Using all {len(record.train)} train examples")
+            sampled_train = train_pool
+            print(f"[BestOfK] Using all {len(train_pool)} train examples")
+        
+        # Create record with sampled train examples (test stays the same)
+        sampled_record = LatentRecord(
+            latent=record.latent,
+            train=sampled_train,
+            test=record.test,  # Already clean from __call__
+            not_active=record.not_active,
+            explanation=record.explanation,
+        )
         
         if not self.is_multishot:
             prompt: list[dict[str, str]] = super()._build_prompt(sampled_record)
@@ -308,6 +484,7 @@ class BestOfKExplainer(DefaultExplainer):
             )
         else:
             prompt: list[dict[str, str]] = super()._build_prompt(sampled_record)
+        
         return prompt
 
     def parse_single_explanation(self, text: str) -> str:
@@ -333,6 +510,15 @@ class BestOfKExplainer(DefaultExplainer):
             if explanations:
                 # Clean up and return only non-empty explanations
                 cleaned = [exp.strip() for exp in explanations if exp.strip()]
+                
+                # IMPORTANT: Cap at the requested number of explanations
+                if len(cleaned) > self.bestofk_num_explanations:
+                    print(
+                        f"[BestOfK] WARNING: Parsed {len(cleaned)} explanations but only expected "
+                        f"{self.bestofk_num_explanations}. Keeping first {self.bestofk_num_explanations}."
+                    )
+                    cleaned = cleaned[:self.bestofk_num_explanations]
+                
                 return cleaned if cleaned else ["Explanation could not be parsed."]
             else:
                 return ["Explanation could not be parsed."]
