@@ -40,6 +40,7 @@ from delphi.log.result_analysis import log_results
 from delphi.pipeline import Pipe, Pipeline, process_wrapper
 from delphi.scorers import DetectionScorer, FuzzingScorer, OpenAISimulator, Scorer
 from delphi.scorers.scorer import ScorerResult
+from delphi.server_utils import check_other_vllm_servers, start_server_if_not_running
 from delphi.sparse_coders import load_hooks_sparse_coders, load_sparse_coders
 from delphi.utils import assert_type, load_tokenized_data
 
@@ -212,6 +213,12 @@ async def process_cache(
         round_idx: int
         | None = None,  # passed only for iterative, non-final result - iterative produces multiple scores,but only one at a time
     ):
+        def write_duration(base_path: Path, duration: float | None):
+            if duration is not None:
+                meta_path = base_path.with_name(base_path.stem + "_metadata.json")
+                with open(meta_path, "wb") as f:
+                    f.write(orjson.dumps({"duration": duration}))
+
         tmp = result if isinstance(result, list) else [result]
         safe_latent_name = str(tmp[0].record.latent).replace("/", "--")
 
@@ -227,6 +234,9 @@ async def process_cache(
             )
             with open(out_path, "wb") as f:
                 f.write(orjson.dumps(result.score))
+            
+            write_duration(out_path, result.duration)
+
             if run_cfg.verbose:
                 print(
                     f"[scorer_postprocess] Wrote BestOfK candidate score {explanation_id}: {out_path}"
@@ -238,6 +248,9 @@ async def process_cache(
                 out_path = score_dir / f"{safe_latent_name}.txt"
                 with open(out_path, "wb") as f:
                     f.write(orjson.dumps(tmp[0].score))
+                
+                write_duration(out_path, tmp[0].duration)
+
                 if run_cfg.verbose:
                     print(
                         f"[scorer_postprocess] Wrote iterative FINAL score: {out_path}"
@@ -252,6 +265,9 @@ async def process_cache(
                         )
                         with open(out_path, "wb") as f:
                             f.write(orjson.dumps(res.score))
+                        
+                        write_duration(out_path, res.duration)
+
                         if run_cfg.verbose:
                             print(
                                 f"[scorer_postprocess] Wrote iterative multi-score: {out_path}"
@@ -265,6 +281,9 @@ async def process_cache(
                     )
                     with open(out_path, "wb") as f:
                         f.write(orjson.dumps(result.score))
+                    
+                    write_duration(out_path, result.duration)
+
                     if run_cfg.verbose:
                         print(
                             f"[scorer_postprocess] Wrote iterative multi-score: {out_path}"
@@ -274,6 +293,9 @@ async def process_cache(
             out_path = score_dir / f"{safe_latent_name}.txt"
             with open(out_path, "wb") as f:
                 f.write(orjson.dumps(result.score))
+            
+            write_duration(out_path, result.duration)
+
             if run_cfg.verbose:
                 print(f"[scorer_postprocess] Wrote score: {out_path}")
 
@@ -351,6 +373,12 @@ async def process_cache(
                 )
                 with open(path, "wb") as f:
                     f.write(orjson.dumps(explainer_result.explanation))
+                
+                if explainer_result.duration is not None:
+                    meta_path = path.with_name(path.stem + "_metadata.json")
+                    with open(meta_path, "wb") as f:
+                        f.write(orjson.dumps({"duration": explainer_result.duration}))
+
                 if run_cfg.verbose:
                     print(f"[explainer_postprocess] Wrote explanation: {path}")
 
@@ -406,9 +434,9 @@ async def process_cache(
                 use_random_baseline=run_cfg.use_random_baseline,
                 random_baseline_source_run=run_cfg.random_baseline_source_run,
             )
-            # Configure spot-check logging
-            setattr(explainer, "spot_check_dir", (scores_path.parent / "spot_check").resolve())
-            setattr(explainer, "spot_check_mod", 100)
+            # Spot check logging disabled for performance
+            # setattr(explainer, "spot_check_dir", (scores_path.parent / "spot_check").resolve())
+            # setattr(explainer, "spot_check_mod", 100)
         elif run_cfg.explainer == "iterative":
             # Iterative hill-climbing orchestrates explanation + scoring internally
             iterative_explainer = IterativeExplainer(
@@ -441,8 +469,6 @@ async def process_cache(
                 explainer_postprocess=explainer_postprocess,
                 explainer=iterative_explainer,
                 iterative_num_rounds=run_cfg.iterative_num_rounds,
-                iterative_holdout_ratio_of_total=run_cfg.iterative_holdout_ratio_of_total,
-                iterative_test_ratio_of_nonholdout=run_cfg.iterative_test_ratio_of_nonholdout,
                 judge_scorer_index=run_cfg.judge_scorer_index,
                 iterative_carryforward_strategy=getattr(
                     run_cfg, "iterative_carryforward_strategy", "last"
@@ -703,151 +729,11 @@ async def run(
         )
 
 
-def check_other_vllm_servers():
-    """Check for other vLLM servers running and warn user"""
-    try:
-        # Use pgrep to find vLLM processes
-        result = subprocess.run(
-            ["pgrep", "-f", "vllm.*serve"], capture_output=True, text=True, check=False
-        )
-
-        if result.returncode == 0 and result.stdout.strip():
-            pids = result.stdout.strip().split("\n")
-            print(
-                f"⚠️  WARNING: Found {len(pids)} other vLLM server process(es) running:"
-            )
-            for pid in pids:
-                if pid.strip():
-                    # Get more details about the process
-                    try:
-                        ps_result = subprocess.run(
-                            ["ps", "-p", pid.strip(), "-o", "pid,ppid,cmd"],
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                        )
-                        if ps_result.returncode == 0:
-                            cmd_line = ps_result.stdout.strip().split("\n")[-1]
-                            print(f"   PID {pid.strip()}: {cmd_line}")
-                    except Exception:
-                        print(f"   PID {pid.strip()}")
-            print("   Consider stopping other servers to avoid resource conflicts.")
-            print()
-    except Exception as e:
-        print(f"Could not check for other vLLM servers: {e}")
-
-
 def start_server_if_not_running(server_port: int, run_cfg: RunConfig):
-    # Check for other vLLM servers first
-    check_other_vllm_servers()
-
-    try:
-        response = requests.get(f"http://localhost:{server_port}/v1/models")
-        if response.status_code == 200:
-            print(
-                f"[run_experiment.py:start_server_if_not_running] Server is already running on port {server_port}"
-            )
-            return
-    except requests.exceptions.RequestException:
-        print(
-            f"[run_experiment.py:start_server_if_not_running] Server is not running on port {server_port}; attempting to start server"
-        )
-        # Build command with conditional boolean flags
-        cmd = [
-            "vllm",
-            "serve",
-            getattr(
-                run_cfg,
-                "explainer_model",
-                "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
-            ),  # positional model argument
-            "--host",
-            "0.0.0.0",
-            "--max-model-len",
-            str(getattr(run_cfg, "explainer_model_max_len", 5120)),
-            "--tensor-parallel-size",
-            str(getattr(run_cfg, "num_gpus", torch.cuda.device_count())),
-            "--gpu-memory-utilization",
-            str(getattr(run_cfg, "max_memory_utilization", 0.9)),
-            "--port",
-            str(getattr(run_cfg, "server_port", 8000)),
-            "--uvicorn-log-level",
-            "warning",
-            # "--disable-log-requests",
-            # "--no-access-log",
-        ]
-
-        # Add boolean flags only if True (don't pass False values)
-        if getattr(run_cfg, "enable_prefix_caching", True):
-            cmd.append("--enable-prefix-caching")
-        if getattr(run_cfg, "enforce_eager", True):
-            cmd.append("--enforce-eager")
-
-        model_name_lower = str(getattr(run_cfg, "explainer_model", "")).lower()
-        if "qwen" in model_name_lower:
-            # cmd.append("--disable-think")
-            pass
-
-        # Reduce vLLM logging verbosity
-        os.environ["VLLM_LOGGING_LEVEL"] = os.environ.get(
-            "VLLM_LOGGING_LEVEL", "WARNING"
-        )
-        os.environ["VLLM_CONFIGURE_LOGGING"] = os.environ.get(
-            "VLLM_CONFIGURE_LOGGING", "1"
-        )
-
-        server_process = subprocess.Popen(
-            cmd,
-            # Don't redirect stdout/stderr initially - let server logs show
-            start_new_session=True,
-        )
-        # server_process is the process - return so we can shut down later
-    with open(f"/tmp/vllm_{run_cfg.server_port}.pid", "w") as f:
-        f.write(str(server_process.pid))
-    # kill with:
-    # pid = int(open("/tmp/vllm_8000.pid").read())
-    # os.killpg(pid, signal.SIGTERM)
-
-    for i in range(10):  # 10 * 30 seconds = 5 minutes
-        try:
-            response = requests.get(f"http://localhost:{server_port}/v1/models")
-            if response.status_code == 200:
-                print(
-                    f"[run_experiment.py:start_server_if_not_running] Server is running on port {server_port}"
-                )
-                # Now detach the server process so it continues after script ends
-                print(
-                    "[run_experiment.py:start_server_if_not_running] Detaching server process..."
-                )
-                return server_process
-        except requests.exceptions.RequestException:
-            # print(f"Server is not running on port {server_port}")
-            print(
-                f"[run_experiment.py:start_server_if_not_running] \
-                Have waited {i / 2} minutes.  Will wait another {5 - i / 2} minutes"
-            )
-            time.sleep(30)  # 30 seconds
-
-    print(
-        f"Server did not start on port {server_port} after 5 minutes; giving up; terminating + killing"
-    )
-    server_process.terminate()
-    server_process.kill()
-
-    # Wait a moment for process to actually terminate
-    try:
-        server_process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        # Force kill if it doesn't terminate gracefully
-        server_process.kill()
-        server_process.wait(timeout=5)
-
-    # Assert that the server process was successfully aborted
-    assert server_process.poll() is not None, (
-        f"Failed to abort server process on port {server_port}; pid: {server_process.pid}"
-    )
-    print("Server process successfully aborted")
-    return server_process
+    # This function has been moved to delphi.server_utils
+    # Keeping this stub here in case it's called from elsewhere, though it shouldn't be
+    from delphi.server_utils import start_server_if_not_running as _start
+    return _start(server_port, run_cfg)
 
 
 class ExperimentRunner:
@@ -871,29 +757,39 @@ def default_run_config() -> RunConfig:
     constructor_cfg = ConstructorConfig(
         example_ctx_len=32,
         min_examples=200,  # gate only
-        n_non_activating=60,
+        n_non_activating=350,
     )
 
     sampler_cfg = SamplerConfig(
-        # NOTE: Sampler samples from record.examples (ALL examples for a latent) to create two pools:
-        #   record.train = n_examples_train examples (sampled using quantiles/top/random)
-        #   record.test = n_examples_test examples (sampled using quantiles)
+        # NOTE: Data flow for BestOfK and Iterative explainers:
         #
-        # How YOUR explainers use these pools (BestOfK and Iterative):
-        #   Both use record.train as their source pool and split it into train/test(/holdout)
-        #   - BestOfK: Splits record.train → train (25%), test (75%)
-        #     Shows ~20 examples (default), scores on rest
-        #   - Iterative: Splits record.train → holdout (10%), test (54%), train (18%)
-        #     Shows ~20 per round, collects FP/FN from test, final eval on holdout
+        # 1. Constructor creates:
+        #    - record.examples: ALL activating examples (from constructor_cfg.min_examples, e.g., 200)
+        #    - record.not_active: non-activating examples (from constructor_cfg.n_non_activating, e.g., 350)
         #
-        # CRITICAL: Set n_examples_train large enough (80+)!
-        #   With n_train=80:
-        #     BestOfK → train=20, test=60
-        #     Iterative → holdout=8, test=54, train=18
-        #   
-        # record.test is used for non-activating examples (record.not_active) for scoring only
-        n_examples_train=80,  # Source pool for BestOfK and Iterative (must be 40+ for validation)
-        n_examples_test=100,  # Used for non-activating examples in scoring
+        # 2. Sampler populates record.train and record.test with subsets from record.examples:
+        #    - record.train: n_examples_train activating examples (with str_tokens populated)
+        #    - record.test: n_examples_test activating examples (with str_tokens populated)
+        #    - record.not_active: remains unchanged (str_tokens added by constructor)
+        #
+        # 3. BestOfK uses record.train and record.test DIRECTLY (no re-splitting):
+        #    - Train: record.train (for prompting)
+        #    - Test: record.test (activating) + record.not_active (non-activating) for scoring
+        #    - Example: n_train=20 → 20 train, n_test=150 → 150 test + 350 non-activating
+        #
+        # 4. Iterative uses record.train for training+test, record.test for holdout:
+        #    - Train+Test: record.train (sample from for prompting, score against for FP/FN collection)
+        #    - Holdout: record.test (activating) + record.not_active (non-activating) for final eval
+        #    - Example: n_train=100 → sample 20 for prompt, score against 100 + 350 non-activating
+        #               n_test=150 → 150 activating + 350 non-activating for holdout
+        #
+        # KEY PARAMETERS:
+        #   - n_examples_train: For BestOfK prompting (20), or Iterative train+test pool (100)
+        #   - n_examples_test: For scoring (150 activating examples)
+        #   - constructor_cfg.min_examples: Total activating examples (200)
+        #   - constructor_cfg.n_non_activating: Total non-activating pool (350)
+        n_examples_train=20,  # Sampler populates this many in record.train
+        n_examples_test=150,  # Sampler populates this many in record.test
         n_quantiles=5,
     )
 
@@ -932,7 +828,7 @@ def default_run_config() -> RunConfig:
         bestofk_is_multishot=True,
         # iterative only
         iterative_num_rounds=5,
-        iterative_holdout_ratio_of_total=0.1,
+        #iterative_holdout_ratio_of_total=0.1,
         iterative_test_ratio_of_nonholdout=0.75,
         iterative_max_num_false_positives=10,
         iterative_max_num_false_negatives=10,

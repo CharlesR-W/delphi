@@ -46,6 +46,28 @@ def plot_firing_vs_f1(
         plt.close()
 
 
+def plot_timings(
+    timing_df: pd.DataFrame, out_dir: Path, run_label: str, image_format: str = "pdf"
+) -> None:
+    if timing_df.empty:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / f"{run_label}_timings.{image_format}"
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Group by latent and type (explanation vs scoring)
+    sns.boxplot(data=timing_df, x="type", y="duration", ax=ax)
+    
+    ax.set_title(f"Duration Distribution: Explanation vs Scoring - {run_label}")
+    ax.set_ylabel("Duration (seconds)")
+    ax.set_yscale("log")  # Log scale often helps with timing data
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
 def compute_auc(df: pd.DataFrame) -> float | None:
     if not df.probability.nunique():
         return None
@@ -257,9 +279,49 @@ def load_data(scores_path: Path, modules: list[str]):
 
                 latent_dfs.append(latent_df)
     if len(latent_dfs) > 1:
-        return pd.concat(latent_dfs, ignore_index=True), counts
+        latent_df = pd.concat(latent_dfs, ignore_index=True)
     else:
-        return latent_dfs[0], counts
+        latent_df = latent_dfs[0] if latent_dfs else pd.DataFrame()
+
+    # Load timings
+    timings = []
+    
+    # 1. Explanation timings
+    expl_dir = scores_path.parent / "explanations"
+    if expl_dir.exists():
+        for meta_file in expl_dir.glob("*_metadata.json"):
+            try:
+                latent = meta_file.stem.replace("_metadata", "")
+                meta = orjson.loads(meta_file.read_bytes())
+                if "duration" in meta:
+                    timings.append({
+                        "latent": latent,
+                        "type": "explanation", 
+                        "duration": meta["duration"]
+                    })
+            except Exception:
+                pass
+
+    # 2. Scorer timings
+    for score_type_dir in scores_path.iterdir():
+        if not score_type_dir.is_dir():
+            continue
+        for meta_file in score_type_dir.glob("*_metadata.json"):
+            try:
+                latent = meta_file.stem.replace("_metadata", "")
+                meta = orjson.loads(meta_file.read_bytes())
+                if "duration" in meta:
+                    timings.append({
+                        "latent": latent,
+                        "type": f"scoring_{score_type_dir.name}",
+                        "duration": meta["duration"]
+                    })
+            except Exception:
+                pass
+                
+    timing_df = pd.DataFrame(timings)
+    
+    return latent_df, counts, timing_df
 
 
 def frequency_weighted_f1(
@@ -342,7 +404,12 @@ def log_results(
     scorer_names: list[str],
     image_formats: list[Literal["png", "pdf"]] = ["pdf"],
 ):
-    latent_df, counts = load_data(scores_path, modules)
+    latent_df, counts, timing_df = load_data(scores_path, modules)
+    
+    # Plot timings
+    for image_format in image_formats:
+        plot_timings(timing_df, viz_path, scores_path.name, image_format=image_format)
+
     latent_df = latent_df[latent_df["score_type"].isin(scorer_names)]
     latent_df = add_latent_f1(latent_df)
 

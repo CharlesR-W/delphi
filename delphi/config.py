@@ -9,13 +9,14 @@ from simple_parsing import Serializable, field, list_field
 @dataclass
 class SamplerConfig(Serializable):
     n_examples_train: int = 20
-    """Target number of activating examples in the train/test pool.
-    These are sampled upstream and then split per-round for explainers.
-    This is a pool size, not necessarily the exact number shown each round."""
+    """Number of activating examples in record.train.
+    - BestOfK: Uses record.train directly for prompting (samples subset if needed)
+    - Iterative: Uses record.train as pool to sample from each round for prompting + FP/FN collection"""
 
     n_examples_test: int = 50
-    """Target number of activating examples reserved for holdout/evaluation.
-    Used as a pool for final evaluation or per your split policy."""
+    """Number of activating examples in record.test.
+    - BestOfK: Used for scoring (along with record.not_active)
+    - Iterative: Used as holdout set for final evaluation (along with record.not_active)"""
 
     n_quantiles: int = 10
     """Number of latent activation quantiles to sample."""
@@ -267,12 +268,6 @@ class RunConfig(Serializable):
     # Iterative-specific configuration
     iterative_num_rounds: int = field(default=3)
     """Number of iterative refinement rounds for the iterative explainer."""
-
-    iterative_holdout_ratio_of_total: float = field(default=0.1)
-    """Ratio of total available test/non-activating examples to hold out for final evaluation."""
-
-    iterative_test_ratio_of_nonholdout: float = field(default=0.1)
-    """Ratio of non-holdout examples to use as the test set per round."""
 
     iterative_max_num_false_positives: int = field(default=20)
     """Maximum number of false positive extra examples to include when refining prompts."""

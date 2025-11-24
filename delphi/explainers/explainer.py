@@ -24,6 +24,9 @@ class ExplainerResult(NamedTuple):
     explanation_id: Optional[int] = 0
     """The id of the explanation; used for explainers which produce multiple explanations."""
 
+    duration: Optional[float] = None
+    """Time taken to generate the explanation in seconds."""
+
 
 @dataclass
 class Explainer(ABC):
@@ -44,9 +47,13 @@ class Explainer(ABC):
 
     async def __call__(self, record: LatentRecord) -> ExplainerResult:
         messages = self._build_prompt(record)
+        import time
+        start_time = time.time()
         response = await self.client.generate(
             messages, temperature=self.temperature, **self.generation_kwargs
         )
+        end_time = time.time()
+        duration = end_time - start_time
         assert isinstance(response, Response)
 
         try:
@@ -64,7 +71,7 @@ class Explainer(ABC):
             # Use explanation_id from record if it exists
             explanation_id = getattr(record, "explanation_id", None)
             return ExplainerResult(
-                record=record, explanation=explanation, explanation_id=explanation_id
+                record=record, explanation=explanation, explanation_id=explanation_id, duration=duration
             )
         except Exception as e:
             logger.error(f"Explanation parsing failed: {repr(e)}")
@@ -73,6 +80,7 @@ class Explainer(ABC):
                 record=record,
                 explanation="Explanation could not be parsed.",
                 explanation_id=explanation_id,
+                duration=duration
             )
 
     def parse_explanation(self, text: str) -> str:

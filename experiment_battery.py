@@ -9,10 +9,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, Sequence
 
+import matplotlib
+matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 import orjson
 import pandas as pd
+import seaborn as sns
 from scipy.stats import gaussian_kde
 
 from delphi.config import RunConfig
@@ -31,12 +34,18 @@ else:  # pragma: no cover
     from .run_experiment import ExperimentRunner, default_run_config
 
 
+# Set matplotlib style
+sns.set_style("whitegrid")
+plt.rcParams["figure.figsize"] = (10, 6)
+plt.rcParams["figure.dpi"] = 100
+
+
 # ----------------------
 # Multi-round explanation analysis helper functions
 # ----------------------
 
 
-def _compute_baseline_metrics(n_pos: int = 100, n_neg: int = 60) -> dict[str, float]:
+def _compute_baseline_metrics(n_pos: int = 150, n_neg: int = 350) -> dict[str, float]:
     """Compute baseline F1 and accuracy metrics for random guessing strategies.
     
     Args:
@@ -206,13 +215,29 @@ def _plot_box_per_round(
             patch.set_facecolor("lightblue")
 
         # Add baseline reference lines
-        ax.axhline(y=baselines["always_true_f1"], color="gray", linestyle="--", 
-                   linewidth=1, alpha=0.5, label="Always guess positive")
-        ax.axhline(y=baselines["random_f1"], color="dimgray", linestyle=":", 
-                   linewidth=1, alpha=0.5, label="Random (by frequency)")
+        ax.axhline(
+            y=baselines["always_true_f1"],
+            color="gray",
+            linestyle="--",
+            linewidth=1,
+            alpha=0.5,
+            label="Always guess positive",
+        )
+        ax.axhline(
+            y=baselines["random_f1"],
+            color="dimgray",
+            linestyle=":",
+            linewidth=1,
+            alpha=0.5,
+            label="Random (by frequency)",
+        )
 
         # Titles and labels
-        fig.suptitle("Frequency-agnostic F1 score distribution by round", fontsize=14, fontweight="bold")
+        fig.suptitle(
+            "Frequency-agnostic F1 score distribution by round",
+            fontsize=14,
+            fontweight="bold",
+        )
         ax.set_title(run_label, fontsize=12)
         ax.set_xlabel("Round")
         ax.set_ylabel("Frequency-agnostic F1 score")
@@ -266,13 +291,29 @@ def _plot_box_running_best(
             patch.set_facecolor("lightgreen")
 
         # Add baseline reference lines
-        ax.axhline(y=baselines["always_true_f1"], color="gray", linestyle="--", 
-                   linewidth=1, alpha=0.5, label="Always guess positive")
-        ax.axhline(y=baselines["random_f1"], color="dimgray", linestyle=":", 
-                   linewidth=1, alpha=0.5, label="Random (by frequency)")
+        ax.axhline(
+            y=baselines["always_true_f1"],
+            color="gray",
+            linestyle="--",
+            linewidth=1,
+            alpha=0.5,
+            label="Always guess positive",
+        )
+        ax.axhline(
+            y=baselines["random_f1"],
+            color="dimgray",
+            linestyle=":",
+            linewidth=1,
+            alpha=0.5,
+            label="Random (by frequency)",
+        )
 
         # Titles and labels
-        fig.suptitle("Running best frequency-agnostic F1 score by round", fontsize=14, fontweight="bold")
+        fig.suptitle(
+            "Running best frequency-agnostic F1 score by round",
+            fontsize=14,
+            fontweight="bold",
+        )
         ax.set_title(run_label, fontsize=12)
         ax.set_xlabel("Round")
         ax.set_ylabel("Best frequency-agnostic F1 score (so far)")
@@ -336,13 +377,29 @@ def _plot_kde_best_scores(
         # ax.plot(x_range, theoretical_max_pdf, linewidth=2, linestyle="--", label=f"Theoretical max of {k} IID")
 
         # Add baseline reference lines
-        ax.axvline(x=baselines["always_true_f1"], color="gray", linestyle="--", 
-                   linewidth=1, alpha=0.5, label="Always guess positive")
-        ax.axvline(x=baselines["random_f1"], color="dimgray", linestyle=":", 
-                   linewidth=1, alpha=0.5, label="Random (by frequency)")
+        ax.axvline(
+            x=baselines["always_true_f1"],
+            color="gray",
+            linestyle="--",
+            linewidth=1,
+            alpha=0.5,
+            label="Always guess positive",
+        )
+        ax.axvline(
+            x=baselines["random_f1"],
+            color="dimgray",
+            linestyle=":",
+            linewidth=1,
+            alpha=0.5,
+            label="Random (by frequency)",
+        )
 
         # Titles and labels
-        fig.suptitle("Frequency-agnostic F1 score densities (best vs first)", fontsize=14, fontweight="bold")
+        fig.suptitle(
+            "Frequency-agnostic F1 score densities (best vs first)",
+            fontsize=14,
+            fontweight="bold",
+        )
         ax.set_title(run_label, fontsize=12)
         ax.set_xlabel("Frequency-agnostic F1 score")
         ax.set_ylabel("Density")
@@ -416,13 +473,29 @@ def _plot_kde_all_scores(
         # ax.plot(x_range, theoretical_max_pdf, linewidth=2.5, linestyle="--", color="black", label=f"Theoretical max of {k} IID")
 
         # Add baseline reference lines
-        ax.axvline(x=baselines["always_true_f1"], color="gray", linestyle="--", 
-                   linewidth=1, alpha=0.5, label="Always guess positive")
-        ax.axvline(x=baselines["random_f1"], color="dimgray", linestyle=":", 
-                   linewidth=1, alpha=0.5, label="Random (by frequency)")
+        ax.axvline(
+            x=baselines["always_true_f1"],
+            color="gray",
+            linestyle="--",
+            linewidth=1,
+            alpha=0.5,
+            label="Always guess positive",
+        )
+        ax.axvline(
+            x=baselines["random_f1"],
+            color="dimgray",
+            linestyle=":",
+            linewidth=1,
+            alpha=0.5,
+            label="Random (by frequency)",
+        )
 
         # Titles and labels
-        fig.suptitle("Frequency-agnostic F1 score densities by round", fontsize=14, fontweight="bold")
+        fig.suptitle(
+            "Frequency-agnostic F1 score densities by round",
+            fontsize=14,
+            fontweight="bold",
+        )
         ax.set_title(run_label, fontsize=12)
         ax.set_xlabel("Frequency-agnostic F1 score")
         ax.set_ylabel("Density")
@@ -497,93 +570,119 @@ class ExperimentBattery:
     def build_iterative_grid(self) -> Iterable[ExperimentDefinition]:
         experiments: list[ExperimentDefinition] = []
 
+        # Iterative baseline with n_train=100 (for train+test pool), n_test=150 (for holdout)
+        cfg_baseline = self._make_iterative_config(
+            name="iterative_baseline",
+            rounds=5,
+            carry="best",
+            include_tp_tn=True,
+            always_new_train=False,
+            history_only=False,
+            append_round_to_prompt=True,
+            show_score_to_explainer=False,
+            allow_tp_examples=True,
+        )
         experiments.append(
-            self._make_iterative_config(
-                name="iterative_baseline",
-                rounds=5,
-                carry="best",
-                include_tp_tn=True,
-                always_new_train=False,
-                history_only=False,
-                append_round_to_prompt=True,
-                show_score_to_explainer=False,
-                allow_tp_examples=True,
+            ExperimentDefinition(
+                cfg_baseline.name,
+                replace(cfg_baseline.config, sampler_cfg=replace(cfg_baseline.config.sampler_cfg, n_examples_train=100, n_examples_test=150))
             )
         )
 
+        cfg_rounds10 = self._make_iterative_config(
+            name="iterative_rounds10",
+            rounds=10,
+            carry="best",
+            include_tp_tn=True,
+            always_new_train=False,
+            history_only=False,
+            append_round_to_prompt=True,
+            show_score_to_explainer=False,
+            allow_tp_examples=True,
+        )
         experiments.append(
-            self._make_iterative_config(
-                name="iterative_rounds10",
-                rounds=10,
-                carry="best",
-                include_tp_tn=True,
-                always_new_train=False,
-                history_only=False,
-                append_round_to_prompt=True,
-                show_score_to_explainer=False,
-                allow_tp_examples=True,
+            ExperimentDefinition(
+                cfg_rounds10.name,
+                replace(cfg_rounds10.config, sampler_cfg=replace(cfg_rounds10.config.sampler_cfg, n_examples_train=100, n_examples_test=150))
             )
         )
 
+        cfg_carry_last = self._make_iterative_config(
+            name="iterative_carry-last",
+            rounds=5,
+            carry="last",
+            include_tp_tn=True,
+            always_new_train=False,
+            history_only=False,
+            append_round_to_prompt=True,
+            show_score_to_explainer=False,
+            allow_tp_examples=True,
+        )
         experiments.append(
-            self._make_iterative_config(
-                name="iterative_carry-last",
-                rounds=5,
-                carry="last",
-                include_tp_tn=True,
-                always_new_train=False,
-                history_only=False,
-                append_round_to_prompt=True,
-                show_score_to_explainer=False,
-                allow_tp_examples=True,
+            ExperimentDefinition(
+                cfg_carry_last.name,
+                replace(cfg_carry_last.config, sampler_cfg=replace(cfg_carry_last.config.sampler_cfg, n_examples_train=100, n_examples_test=150))
             )
         )
 
+        cfg_always_new = self._make_iterative_config(
+            name="iterative_always-new-train",
+            rounds=5,
+            carry="best",
+            include_tp_tn=True,
+            always_new_train=True,
+            history_only=False,
+            append_round_to_prompt=True,
+            show_score_to_explainer=False,
+            allow_tp_examples=True,
+        )
         experiments.append(
-            self._make_iterative_config(
-                name="iterative_always-new-train",
-                rounds=5,
-                carry="best",
-                include_tp_tn=True,
-                always_new_train=True,
-                history_only=False,
-                append_round_to_prompt=True,
-                show_score_to_explainer=False,
-                allow_tp_examples=True,
+            ExperimentDefinition(
+                cfg_always_new.name,
+                replace(cfg_always_new.config, sampler_cfg=replace(cfg_always_new.config.sampler_cfg, n_examples_train=100, n_examples_test=150))
             )
         )
 
+        cfg_no_tp_tn = self._make_iterative_config(
+            name="iterative_no-tp-tn",
+            rounds=5,
+            carry="best",
+            include_tp_tn=False,
+            always_new_train=False,
+            history_only=False,
+            append_round_to_prompt=True,
+            show_score_to_explainer=False,
+            allow_tp_examples=True,
+        )
         experiments.append(
-            self._make_iterative_config(
-                name="iterative_no-tp-tn",
-                rounds=5,
-                carry="best",
-                include_tp_tn=False,
-                always_new_train=False,
-                history_only=False,
-                append_round_to_prompt=True,
-                show_score_to_explainer=False,
-                allow_tp_examples=True,
+            ExperimentDefinition(
+                cfg_no_tp_tn.name,
+                replace(cfg_no_tp_tn.config, sampler_cfg=replace(cfg_no_tp_tn.config.sampler_cfg, n_examples_train=100, n_examples_test=150))
             )
         )
 
+        cfg_history_only = self._make_iterative_config(
+            name="iterative_history-only",
+            rounds=5,
+            carry="best",
+            include_tp_tn=True,
+            always_new_train=False,
+            history_only=True,
+            append_round_to_prompt=False,  # History-only experiments don't need round tags
+            show_score_to_explainer=True,  # But they do need scores to learn from
+            allow_tp_examples=True,
+        )
         experiments.append(
-            self._make_iterative_config(
-                name="iterative_history-only",
-                rounds=5,
-                carry="best",
-                include_tp_tn=True,
-                always_new_train=False,
-                history_only=True,
-                append_round_to_prompt=False,  # History-only experiments don't need round tags
-                show_score_to_explainer=True,  # But they do need scores to learn from
-                allow_tp_examples=True,
+            ExperimentDefinition(
+                cfg_history_only.name,
+                replace(cfg_history_only.config, sampler_cfg=replace(cfg_history_only.config.sampler_cfg, n_examples_train=100, n_examples_test=150))
             )
         )
         
         # Variant with 40 train examples per round
-        # NOTE: Iterative splits record.train (160) into holdout (16), test (108), train (36)
-        # This variant shows 40 examples per round (requires larger n_examples_train)
+        # NOTE: Iterative uses record.train for training+test pool, record.test for holdout
+        #       This variant shows 40 examples per round (requires iterative_num_train_examples_per_round=40)
+        #       Set n_examples_train=140 to ensure enough examples for 40 prompts + buffer for always_new_train
         cfg_train40 = self._make_iterative_config(
             name="iterative_train40",
             rounds=5,
@@ -600,7 +699,7 @@ class ExperimentBattery:
             replace(
                 cfg_train40.config, 
                 iterative_num_train_examples_per_round=40,
-                sampler_cfg=replace(cfg_train40.config.sampler_cfg, n_examples_train=160)
+                sampler_cfg=replace(cfg_train40.config.sampler_cfg, n_examples_train=140, n_examples_test=150)
             )
         )
         experiments.append(cfg_train40)
@@ -629,12 +728,12 @@ class ExperimentBattery:
         yield ExperimentDefinition(cfg_oneshot.name, cfg_oneshot)
 
         # Variant with 40 train examples shown to model
-        # NOTE: BestOfK splits record.train (80) into train (20) and test (60)
-        # This variant shows 40 examples (requires larger n_examples_train)
+        # NOTE: BestOfK uses record.train for prompting, record.test for scoring
+        #       This variant shows 40 examples (set n_examples_train=40)
+        #       Test uses n_examples_test=150 activating + 350 non-activating
         cfg_train40 = replace(
             cfg,
-            bestofk_num_train_examples=40,
-            sampler_cfg=replace(cfg.sampler_cfg, n_examples_train=160),  # Need 160 to get train pool of ~40
+            sampler_cfg=replace(cfg.sampler_cfg, n_examples_train=40, n_examples_test=150),
             name="bestofk_train40",
         )
         yield ExperimentDefinition(cfg_train40.name, cfg_train40)
@@ -959,8 +1058,6 @@ class ExperimentBattery:
         scorers: Sequence[str] = ("fuzz",),
         output_prefix: str = "bestofk_vs_iterative",
     ) -> None:
-        import matplotlib.pyplot as plt
-
         compare_dir = self.results_root / "visualize-cross-experiment"
         compare_dir.mkdir(parents=True, exist_ok=True)
 
@@ -968,9 +1065,17 @@ class ExperimentBattery:
         if bestofk_experiments is None or iterative_experiments is None:
             all_experiments = self._discover_experiments_from_results()
             if bestofk_experiments is None:
-                bestofk_experiments = [exp for exp in all_experiments if exp.config.explainer == "bestofk"]
+                bestofk_experiments = [
+                    exp
+                    for exp in all_experiments
+                    if exp.config.explainer == "bestofk"
+                ]
             if iterative_experiments is None:
-                iterative_experiments = [exp for exp in all_experiments if exp.config.explainer == "iterative"]
+                iterative_experiments = [
+                    exp
+                    for exp in all_experiments
+                    if exp.config.explainer == "iterative"
+                ]
 
         for scorer in scorers:
             bok_df = self._collect_metrics(bestofk_experiments, scorer)
@@ -1009,21 +1114,39 @@ class ExperimentBattery:
                     # Add baseline reference lines (only for F1 scores, not weighted)
                     if metric == "f1_score":
                         baselines = _compute_baseline_metrics()
-                        ax.axhline(y=baselines["always_true_f1"], color="gray", linestyle="--", 
-                                   linewidth=1, alpha=0.5, label="Always guess positive")
-                        ax.axhline(y=baselines["random_f1"], color="dimgray", linestyle=":", 
-                                   linewidth=1, alpha=0.5, label="Random (by frequency)")
+                        ax.axhline(
+                            y=baselines["always_true_f1"],
+                            color="gray",
+                            linestyle="--",
+                            linewidth=1,
+                            alpha=0.5,
+                            label="Always guess positive",
+                        )
+                        ax.axhline(
+                            y=baselines["random_f1"],
+                            color="dimgray",
+                            linestyle=":",
+                            linewidth=1,
+                            alpha=0.5,
+                            label="Random (by frequency)",
+                        )
 
                     ax.set_xlabel("Experiment", fontsize=12)
                     # Friendly labels for F1 variants
                     y_label = (
-                        "Frequency-agnostic F1 score" if metric == "f1_score" else "Frequency-weighted F1 score"
+                        "Frequency-agnostic F1 score"
+                        if metric == "f1_score"
+                        else "Frequency-weighted F1 score"
                     )
                     title_label = (
-                        "Frequency-agnostic F1 score comparison" if metric == "f1_score" else "Frequency-weighted F1 score comparison"
+                        "Frequency-agnostic F1 score comparison"
+                        if metric == "f1_score"
+                        else "Frequency-weighted F1 score comparison"
                     )
                     ax.set_ylabel(y_label, fontsize=12)
-                    ax.set_title(f"{title_label} ({scorer})", fontsize=14, fontweight="bold")
+                    ax.set_title(
+                        f"{title_label} ({scorer})", fontsize=14, fontweight="bold"
+                    )
                     ax.set_xticks(metric_df["order"])
                     ax.set_xticklabels(
                         metric_df["run"], rotation=60, ha="right", fontsize=9
@@ -1078,7 +1201,7 @@ if __name__ == "__main__":
     ]
     #include_names = []
     
-    PLOT_ONLY = True
+    PLOT_ONLY = False
 
     def _maybe_filter(exps: list[ExperimentDefinition]) -> list[ExperimentDefinition]:
         return [x for x in exps if x.name in include_names]

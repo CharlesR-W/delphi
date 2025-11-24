@@ -52,6 +52,8 @@ class RefactoredOpenAISimulator(Scorer):
         Returns:
             ``ScorerResult`` containing standard scoring structures.
         """
+        import time
+        start_time = time.time()
         # Build simulator in requested mode
         simulator = NeuronSimulator(
             self.client, record.explanation, use_logprobs=self.all_at_once
@@ -69,8 +71,10 @@ class RefactoredOpenAISimulator(Scorer):
         legacy_results = await simulate_and_score(
             simulator, activation_records, non_activation_records
         )
+        end_time = time.time()
+        duration = end_time - start_time
 
-        return ScorerResult(record=record, score=legacy_results)
+        return ScorerResult(record=record, score=legacy_results, duration=duration)
 
     def to_activation_records(
         self, examples: Sequence[ActivatingExample | NonActivatingExample]

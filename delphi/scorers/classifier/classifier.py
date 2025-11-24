@@ -49,6 +49,8 @@ class Classifier(Scorer):
         self,
         record: LatentRecord,
     ) -> ScorerResult:
+        import time
+        start_time = time.time()
         samples = self._prepare(record)
         self.rng.shuffle(samples)
 
@@ -58,8 +60,10 @@ class Classifier(Scorer):
             record.explanation,
             batched_samples,
         )
+        end_time = time.time()
+        duration = end_time - start_time
 
-        return ScorerResult(record=record, score=results)
+        return ScorerResult(record=record, score=results, duration=duration)
 
     @abstractmethod
     def _prepare(self, record: LatentRecord) -> list[Sample]:

@@ -44,6 +44,8 @@ class EmbeddingScorer(Scorer):
         self,
         record: LatentRecord,
     ) -> ScorerResult:
+        import time
+        start_time = time.time()
         samples = self._prepare(record)
 
         random.shuffle(samples)
@@ -51,8 +53,10 @@ class EmbeddingScorer(Scorer):
             record.explanation,
             samples,
         )
+        end_time = time.time()
+        duration = end_time - start_time
 
-        return ScorerResult(record=record, score=results)
+        return ScorerResult(record=record, score=results, duration=duration)
 
     def call_sync(self, record: LatentRecord) -> ScorerResult:
         return asyncio.run(self.__call__(record))

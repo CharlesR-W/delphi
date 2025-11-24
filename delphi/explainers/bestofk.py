@@ -70,16 +70,16 @@ class BestOfKExplainer(DefaultExplainer):
     ) -> ExplainerResult | tuple[ExplainerResult, list[ExplainerResult]]:
         print(f"[BestOfK] Starting explanation generation for latent {record.latent}")
         
-        # Split record.test into clean train/test pools upfront
+        # Split record into clean train/test pools upfront
         # (unless using random baseline, which doesn't need this)
         if not (self.use_random_baseline and self.random_baseline_source_run):
-            train_pool, test_pool = self._split_train_test(record)
+            train_pool, test_activating, test_non_activating = self._split_train_test(record)
             # Create a record with the clean test split for scoring
             clean_record = LatentRecord(
                 latent=record.latent,
                 train=train_pool,  # Will be resampled in _build_prompt
-                test=test_pool,
-                not_active=record.not_active,
+                test=test_activating,
+                not_active=test_non_activating,
                 explanation=record.explanation,
             )
         else:
@@ -111,19 +111,6 @@ class BestOfKExplainer(DefaultExplainer):
                 pick = np.random.choice(candidates)
                 explanation_text = orjson.loads(pick.read_bytes())
                 print(f"[BestOfK Random Baseline] Using explanation from {pick.name} for latent {record.latent}")
-                
-                # Spot check logging for random baseline
-                if hasattr(self, "spot_check_dir") and hasattr(self, "spot_check_mod"):
-                    if (hash(str(record.latent)) % int(getattr(self, "spot_check_mod", 100))) == 0:
-                        Path(self.spot_check_dir).mkdir(parents=True, exist_ok=True)
-                        spot_check_file = Path(self.spot_check_dir) / f"{str(record.latent).replace('/', '--')}_bestofk_random_baseline.txt"
-                        with open(spot_check_file, "w") as f:
-                            f.write(f"{'='*80}\n")
-                            f.write(f"RANDOM BASELINE\n")
-                            f.write(f"{'='*80}\n")
-                            f.write(f"Source latent file: {pick.name}\n")
-                            f.write(f"Target latent: {record.latent}\n")
-                            f.write(f"\nExplanation:\n{explanation_text}\n")
                 
                 # Create single explainer result
                 from dataclasses import replace
@@ -243,61 +230,6 @@ class BestOfKExplainer(DefaultExplainer):
             explainer_results,
         )
         print(f"[BestOfK] Selected best explanation for latent {record.latent}")
-        
-        # Spot check logging: write all prompts and responses
-        if hasattr(self, "spot_check_dir") and hasattr(self, "spot_check_mod"):
-            if (hash(str(clean_record.latent)) % int(getattr(self, "spot_check_mod", 100))) == 0:
-                Path(self.spot_check_dir).mkdir(parents=True, exist_ok=True)
-                spot_check_file = Path(self.spot_check_dir) / f"{str(clean_record.latent).replace('/', '--')}_bestofk.txt"
-                with open(spot_check_file, "w") as f:
-                    f.write(f"{'='*80}\n")
-                    f.write(f"BESTOFK - PROMPTS AND COMPLETIONS\n")
-                    f.write(f"{'='*80}\n")
-                    f.write(f"Data split (from record.examples={len(record.examples)} total):\n")
-                    f.write(f"  Train pool: {len(clean_record.train)} examples (for prompting)\n")
-                    f.write(f"  Test pool: {len(clean_record.test)} examples (for scoring)\n")
-                    f.write(f"  Showing: {self.bestofk_num_train_examples} examples to model\n")
-                    f.write(f"\nGenerated {len(explainer_results)} explanations\n")
-                    f.write(f"Mode: {'multishot' if self.is_multishot else 'oneshot'}\n")
-                    f.write(f"{'='*80}\n\n")
-                    
-                    # Write prompts and responses
-                    if prompts_and_responses:
-                        for item in prompts_and_responses:
-                            f.write(f"{'='*80}\n")
-                            f.write(f"GENERATION {item['index'] + 1}\n")
-                            f.write(f"{'='*80}\n\n")
-                            f.write("PROMPT:\n")
-                            f.write("-" * 80 + "\n")
-                            # Format messages as string
-                            for msg in item['prompt']:
-                                f.write(f"[{msg['role'].upper()}]\n")
-                                f.write(f"{msg['content']}\n\n")
-                            f.write("-" * 80 + "\n")
-                            f.write("COMPLETION:\n")
-                            f.write("-" * 80 + "\n")
-                            f.write(f"{item['response']}\n")
-                            f.write("-" * 80 + "\n\n")
-                        
-                        # Also write which one was selected as best
-                        f.write(f"\n{'='*80}\n")
-                        f.write(f"BEST EXPLANATION: #{best_explanation_idx + 1}\n")
-                        f.write(f"{'='*80}\n")
-                        f.write(f"{explainer_results[best_explanation_idx].explanation}\n")
-                        
-                # Also log scorer results for best
-                scorer_file = Path(self.spot_check_dir) / f"{str(record.latent).replace('/', '--')}_bestofk_scorer.txt"
-                with open(scorer_file, "w") as f:
-                    f.write(f"{'='*80}\n")
-                    f.write(f"BEST EXPLANATION SCORER RESULTS\n")
-                    f.write(f"{'='*80}\n")
-                    best_result = scorer_results[best_explanation_idx][self.judge_scorer_index]
-                    tp = sum(1 for s in best_result.score if s.correct and s.activating)
-                    fp = sum(1 for s in best_result.score if not s.correct and not s.activating)
-                    fn = sum(1 for s in best_result.score if not s.correct and s.activating)
-                    tn = sum(1 for s in best_result.score if s.correct and not s.activating)
-                    f.write(f"TP: {tp}, FP: {fp}, FN: {fn}, TN: {tn}\n")
-                    f.write(f"Total: {len(best_result.score)} examples\n")
 
         # save the best score for all scorers
         for scorer_idx, (scorer, score_dir) in enumerate(self.scorers_with_paths):
@@ -414,39 +346,24 @@ class BestOfKExplainer(DefaultExplainer):
 
         return best_idx
 
-    def _split_train_test(self, record: LatentRecord) -> tuple[list, list]:
-        """Split record.examples into non-overlapping train/test pools.
+    def _split_train_test(self, record: LatentRecord) -> tuple[list, list, list]:
+        """Use record.train for training and record.test for scoring.
         
-        Similar to Iterative but without holdout.
-        Uses percentage-based split: test gets 75%, train gets 25%.
+        Simplified design: No re-splitting, no ratios.
+        - Train: record.train (activating examples for prompting)
+        - Test: record.test (activating examples for scoring) + record.not_active (non-activating)
         
-        Example with 80 examples from sampler:
-          test = 60 examples (for scoring)
-          train = 20 examples (pool to sample from for prompting)
-        
-        Note: We use record.examples (all examples) as the source pool.
-              Then split it into smaller train (for showing) and test (for scoring).
+        Returns:
+          (train_activating, test_activating, test_non_activating)
         """
-        all_activating_examples = list(record.examples)
+        train_examples = list(record.train)
+        test_activating_examples = list(record.test)
+        test_non_activating_examples = list(record.not_active)
         
-        # Validate we have enough examples
-        if len(all_activating_examples) < 40:
-            raise ValueError(
-                f"[BestOfK] Not enough examples! Got {len(all_activating_examples)} in record.examples, "
-                f"need at least 40. Increase n_examples in sampler config."
-            )
+        print(f"[BestOfK] Using: train={len(train_examples)} activating, "
+              f"test={len(test_activating_examples)} activating + {len(test_non_activating_examples)} non-activating")
         
-        # Shuffle for randomness
-        random.shuffle(all_activating_examples)
-        
-        # Split: test gets 75%, train gets 25%
-        test_size = int(len(all_activating_examples) * 0.75)
-        test_examples = all_activating_examples[:test_size]
-        train_examples = all_activating_examples[test_size:]
-        
-        print(f"[BestOfK] Split record.examples ({len(all_activating_examples)}) → train={len(train_examples)}, test={len(test_examples)}")
-        
-        return train_examples, test_examples
+        return train_examples, test_activating_examples, test_non_activating_examples
     
     def _build_prompt(self, record: LatentRecord) -> list[dict[str, str]]:
         """Build prompt for explanation generation.

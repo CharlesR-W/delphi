@@ -174,8 +174,14 @@ async def process_cache(
     if not run_cfg.explainer == "none":
 
         def explainer_postprocess(result):
-            with open(explanations_path / f"{result.record.latent}.txt", "wb") as f:
+            path = explanations_path / f"{result.record.latent}.txt"
+            with open(path, "wb") as f:
                 f.write(orjson.dumps(result.explanation))
+            
+            if result.duration is not None:
+                meta_path = path.with_name(path.stem + "_metadata.json")
+                with open(meta_path, "wb") as f:
+                    f.write(orjson.dumps({"duration": result.duration}))
 
             return result
 
@@ -232,9 +238,15 @@ async def process_cache(
     # Saves the score to a file
     def scorer_postprocess(result, score_dir):
         safe_latent_name = str(result.record.latent).replace("/", "--")
+        out_path = score_dir / f"{safe_latent_name}.txt"
 
-        with open(score_dir / f"{safe_latent_name}.txt", "wb") as f:
+        with open(out_path, "wb") as f:
             f.write(orjson.dumps(result.score))
+        
+        if result.duration is not None:
+            meta_path = out_path.with_name(out_path.stem + "_metadata.json")
+            with open(meta_path, "wb") as f:
+                f.write(orjson.dumps({"duration": result.duration}))
 
     scorers = []
     for scorer_name in run_cfg.scorers:

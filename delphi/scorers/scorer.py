@@ -11,6 +11,9 @@ class ScorerResult(NamedTuple):
     score: Any
     """Generated score for latent."""
 
+    duration: Optional[float] = None
+    """Time taken to generate the score in seconds."""
+
 
 class Scorer(ABC):
     @abstractmethod
