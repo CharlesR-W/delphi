@@ -20,6 +20,9 @@ class EmbeddingOutput:
     similarity: float = 0
     """What is the similarity of the example to the explanation"""
 
+    activating: bool = False
+    """Whether the example is activating or not"""
+
 
 class Sample(NamedTuple):
     text: str
@@ -64,25 +67,18 @@ class EmbeddingScorer(Scorer):
     def _prepare(self, record: LatentRecord) -> list[Sample]:
         """
         Prepare and shuffle a list of samples for classification.
+        Uses the standard activating/non-activating pools supplied on the record.
         """
+        if not record.not_active:
+            raise ValueError(
+                "EmbeddingScorer requires non-activating examples (record.not_active)."
+            )
+        if not record.test:
+            raise ValueError("EmbeddingScorer requires activating test examples.")
+
         samples = []
-
-        assert (
-            record.extra_examples is not None
-        ), "Extra (non-activating) examples need to be provided"
-
-        samples.extend(
-            examples_to_samples(
-                record.extra_examples,
-            )
-        )
-
-        samples.extend(
-            examples_to_samples(
-                record.test,
-            )
-        )
-
+        samples.extend(examples_to_samples(record.not_active))
+        samples.extend(examples_to_samples(record.test))
         return samples
 
     def _query(self, explanation: str, samples: list[Sample]) -> list[EmbeddingOutput]:
@@ -91,6 +87,8 @@ class EmbeddingScorer(Scorer):
             "\nQuery:"
         )
         explanation_prompt = explanation_string + explanation
+        samples_text = [sample.text for sample in samples]
+
         query_embeding = self.model.encode(explanation_prompt)
         samples_text = [sample.text for sample in samples]
 
@@ -126,6 +124,7 @@ def examples_to_samples(
                         if isinstance(example, ActivatingExample)
                         else example.distance
                     ),
+                    activating=isinstance(example, ActivatingExample),
                 ),
             )
         )

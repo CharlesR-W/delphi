@@ -11,7 +11,7 @@ class ScorerResult(NamedTuple):
     score: Any
     """Generated score for latent."""
 
-    duration: Optional[float] = None
+    duration: float | None = None
     """Time taken to generate the score in seconds."""
 
 

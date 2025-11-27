@@ -1,3 +1,5 @@
+from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, TypeVar, cast
 
 import numpy as np
@@ -101,3 +103,35 @@ def to_int64_tensor(tensor: np.ndarray) -> Tensor:
     result = torch.zeros(t.shape[0] * multiplier, dtype=signed_torch_dtype)
     result[::multiplier] = t
     return result.view(torch.int64).view(og_shape)
+
+
+@dataclass
+class _TimingStats:
+    total_duration: float = 0.0
+    num_calls: int = 0
+
+
+class TimingAggregator:
+    """Accumulates timing statistics keyed by explainer/scorer name."""
+
+    def __init__(self) -> None:
+        self._data: dict[str, _TimingStats] = defaultdict(_TimingStats)
+
+    def add(self, key: str, duration: float | None) -> None:
+        if duration is None:
+            return
+        stats = self._data[key]
+        stats.total_duration += duration
+        stats.num_calls += 1
+
+    def as_dict(self) -> dict[str, dict[str, float]]:
+        summary: dict[str, dict[str, float]] = {}
+        for key, stats in self._data.items():
+            entry = {
+                "total_duration": stats.total_duration,
+                "num_calls": stats.num_calls,
+            }
+            if stats.num_calls:
+                entry["avg_duration"] = stats.total_duration / stats.num_calls
+            summary[key] = entry
+        return summary

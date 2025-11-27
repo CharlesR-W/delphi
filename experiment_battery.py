@@ -706,15 +706,20 @@ class ExperimentBattery:
 
         return experiments
 
+
     def build_bestofk_grid(self) -> Iterable[ExperimentDefinition]:
+        fuzz_index = (
+            self.base_config.scorers.index("fuzz")
+            if "fuzz" in self.base_config.scorers
+            else 0
+        )
         cfg = replace(
             self.base_config,
             explainer="bestofk",
             bestofk_num_explanations=5,
             explainer_temperature=0.7,
-            judge_scorer_index=self.base_config.scorers.index("fuzz")
-            if "fuzz" in self.base_config.scorers
-            else 1,
+            judge_scorer_index=fuzz_index,
+            bestofk_judge_scorer_index=fuzz_index,
             name="bestofk_baseline",
         )
         yield ExperimentDefinition(cfg.name, cfg)
@@ -737,6 +742,22 @@ class ExperimentBattery:
             name="bestofk_train40",
         )
         yield ExperimentDefinition(cfg_train40.name, cfg_train40)
+
+        if "embedding" in cfg.scorers:
+            embedding_idx = cfg.scorers.index("embedding")
+            cfg_embedding_prefilter = replace(
+                cfg,
+                name="bestofk_embedding_prefilter",
+                bestofk_num_explanations=100,
+                bestofk_embedding_prefilter_enabled=True,
+                bestofk_embedding_prefilter_top_k=10,
+                bestofk_embedding_use_as_judge=True,
+                bestofk_judge_scorer_index=embedding_idx,
+                judge_scorer_index=embedding_idx,
+            )
+            yield ExperimentDefinition(
+                cfg_embedding_prefilter.name, cfg_embedding_prefilter
+            )
 
     def build_random_baseline(self, source_run: str = "bestofk_baseline") -> Iterable[ExperimentDefinition]:
         cfg = replace(
@@ -1190,6 +1211,7 @@ if __name__ == "__main__":
         "bestofk_baseline",
         "bestofk_oneshot",
         "bestofk_train40",
+        "bestofk_embedding_prefilter",
         "bestofk_random-baseline_from-bestofk_baseline",
         "iterative_baseline",
         "iterative_rounds10",

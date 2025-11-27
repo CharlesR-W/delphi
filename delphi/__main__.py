@@ -7,6 +7,7 @@ from typing import Callable
 
 import orjson
 import torch
+from sentence_transformers import SentenceTransformer
 from simple_parsing import ArgumentParser
 from torch import Tensor
 from transformers import (
@@ -27,7 +28,7 @@ from delphi.latents import LatentCache, LatentDataset
 from delphi.latents.neighbours import NeighbourCalculator
 from delphi.log.result_analysis import log_results
 from delphi.pipeline import Pipe, Pipeline, process_wrapper
-from delphi.scorers import DetectionScorer, FuzzingScorer, OpenAISimulator
+from delphi.scorers import DetectionScorer, EmbeddingScorer, FuzzingScorer, OpenAISimulator
 from delphi.sparse_coders import load_hooks_sparse_coders, load_sparse_coders
 from delphi.utils import assert_type, load_tokenized_data
 
@@ -249,6 +250,7 @@ async def process_cache(
                 f.write(orjson.dumps({"duration": result.duration}))
 
     scorers = []
+    embedding_model = None
     for scorer_name in run_cfg.scorers:
         scorer_path = scores_path / scorer_name
         scorer_path.mkdir(parents=True, exist_ok=True)
@@ -275,6 +277,13 @@ async def process_cache(
                 n_examples_shown=run_cfg.num_examples_per_scorer_prompt,
                 verbose=run_cfg.verbose,
                 log_prob=run_cfg.log_probs,
+            )
+        elif scorer_name == "embedding":
+            if embedding_model is None:
+                embedding_model = SentenceTransformer(run_cfg.embedding_model)
+            scorer = EmbeddingScorer(
+                embedding_model,
+                verbose=run_cfg.verbose,
             )
         else:
             raise ValueError(f"Scorer {scorer_name} not supported")

@@ -157,14 +157,21 @@ class RunConfig(Serializable):
             "fuzz",
             "detection",
             "simulation",
+            "embedding",
         ],
         default=[
             "fuzz",
             "detection",
+            "embedding",
         ],
     )
     """Scorer methods to score latent explanations. Options are 'fuzz', 'detection', and
     'simulation'."""
+
+    embedding_model: str = field(
+        default="sentence-transformers/all-MiniLM-L6-v2",
+    )
+    """SentenceTransformer model name/path to use for the embedding scorer."""
 
     explainer_temperature: float = field(default=0.0)
     """Temperature for generation."""
@@ -233,6 +240,9 @@ class RunConfig(Serializable):
     )
     """Port to use for the vLLM server."""
 
+    server_metrics_port: int | None = field(default=None)
+    """Optional Prometheus metrics port for the vLLM server. Defaults to server_port + 1."""
+
     enable_prefix_caching: bool = field(default=True)
     """Enable prefix caching in vLLM server for improved performance."""
 
@@ -264,6 +274,15 @@ class RunConfig(Serializable):
     
     bestofk_num_train_examples: int = field(default=20)
     """Number of train examples to show to the model in BestOfK. Default 20, can use 40."""
+
+    bestofk_embedding_prefilter_enabled: bool = field(default=False)
+    """If True, use embedding scorer to rank all explanations and only run other scorers on top-K."""
+
+    bestofk_embedding_prefilter_top_k: int = field(default=10)
+    """How many embedding-ranked explanations to score with expensive scorers."""
+
+    bestofk_embedding_use_as_judge: bool = field(default=False)
+    """If True, force the embedding scorer to act as the judge for BestOfK selection."""
 
     # Iterative-specific configuration
     iterative_num_rounds: int = field(default=3)

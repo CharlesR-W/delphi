@@ -264,6 +264,9 @@ def load_data(scores_path: Path, modules: list[str]):
             continue
         for module in modules:
             for file in score_type_dir.glob(f"*{module}*"):
+                # Ignore metadata/auxiliary files (e.g., timing sidecars)
+                if file.suffix != ".txt":
+                    continue
                 latent_idx = int(file.stem.split("latent")[-1])
 
                 latent_df = parse_score_file(file)
@@ -285,40 +288,82 @@ def load_data(scores_path: Path, modules: list[str]):
 
     # Load timings
     timings = []
-    
-    # 1. Explanation timings
-    expl_dir = scores_path.parent / "explanations"
-    if expl_dir.exists():
-        for meta_file in expl_dir.glob("*_metadata.json"):
-            try:
-                latent = meta_file.stem.replace("_metadata", "")
-                meta = orjson.loads(meta_file.read_bytes())
-                if "duration" in meta:
-                    timings.append({
-                        "latent": latent,
-                        "type": "explanation", 
-                        "duration": meta["duration"]
-                    })
-            except Exception:
-                pass
+    timing_summary_path = scores_path.parent / "log" / "timings.json"
+    if timing_summary_path.exists():
+        try:
+            timing_summary = orjson.loads(timing_summary_path.read_bytes())
+            for expl_name, stats in timing_summary.get("explainers", {}).items():
+                timings.append(
+                    {
+                        "latent": None,
+                        "type": f"explainer_{expl_name}",
+                        "duration": stats.get("total_duration"),
+                        "num_calls": stats.get("num_calls"),
+                        "avg_duration": stats.get("avg_duration"),
+                    }
+                )
+            for scorer_name, stats in timing_summary.get("scorers", {}).items():
+                timings.append(
+                    {
+                        "latent": None,
+                        "type": f"scoring_{scorer_name}",
+                        "duration": stats.get("total_duration"),
+                        "num_calls": stats.get("num_calls"),
+                        "avg_duration": stats.get("avg_duration"),
+                    }
+                )
+            for bucket_name, bucket_stats in timing_summary.items():
+                if bucket_name in {"explainers", "scorers"}:
+                    continue
+                for label, stats in bucket_stats.items():
+                    timings.append(
+                        {
+                            "latent": None,
+                            "type": f"{bucket_name}_{label}",
+                            "duration": stats.get("total_duration"),
+                            "num_calls": stats.get("num_calls"),
+                            "avg_duration": stats.get("avg_duration"),
+                        }
+                    )
+        except Exception:
+            print(f"Failed to parse timing summary: {timing_summary_path}")
+    else:
+        # Legacy per-latent metadata fallbacks
+        expl_dir = scores_path.parent / "explanations"
+        if expl_dir.exists():
+            for meta_file in expl_dir.glob("*_metadata.json"):
+                try:
+                    latent = meta_file.stem.replace("_metadata", "")
+                    meta = orjson.loads(meta_file.read_bytes())
+                    if "duration" in meta:
+                        timings.append(
+                            {
+                                "latent": latent,
+                                "type": "explanation",
+                                "duration": meta["duration"],
+                            }
+                        )
+                except Exception:
+                    pass
 
-    # 2. Scorer timings
-    for score_type_dir in scores_path.iterdir():
-        if not score_type_dir.is_dir():
-            continue
-        for meta_file in score_type_dir.glob("*_metadata.json"):
-            try:
-                latent = meta_file.stem.replace("_metadata", "")
-                meta = orjson.loads(meta_file.read_bytes())
-                if "duration" in meta:
-                    timings.append({
-                        "latent": latent,
-                        "type": f"scoring_{score_type_dir.name}",
-                        "duration": meta["duration"]
-                    })
-            except Exception:
-                pass
-                
+        for score_type_dir in scores_path.iterdir():
+            if not score_type_dir.is_dir():
+                continue
+            for meta_file in score_type_dir.glob("*_metadata.json"):
+                try:
+                    latent = meta_file.stem.replace("_metadata", "")
+                    meta = orjson.loads(meta_file.read_bytes())
+                    if "duration" in meta:
+                        timings.append(
+                            {
+                                "latent": latent,
+                                "type": f"scoring_{score_type_dir.name}",
+                                "duration": meta["duration"],
+                            }
+                        )
+                except Exception:
+                    pass
+
     timing_df = pd.DataFrame(timings)
     
     return latent_df, counts, timing_df

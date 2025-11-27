@@ -3,7 +3,9 @@ import random
 import re
 from functools import partial
 from pathlib import Path
+from statistics import fmean
 from typing import Callable
+
 import numpy as np
 import orjson
 
@@ -14,6 +16,7 @@ from delphi.explainers.explainer import ExplainerResult
 from delphi.latents.latents import LatentRecord
 from delphi.pipeline import Pipe, Pipeline, process_wrapper
 from delphi.scorers.classifier.classifier import ClassifierOutput
+from delphi.scorers.embedding.embedding import EmbeddingOutput
 from delphi.scorers.scorer import Scorer, ScorerResult
 
 
@@ -34,6 +37,9 @@ class BestOfKExplainer(DefaultExplainer):
         bestofk_num_train_examples: int | None = None,
         use_random_baseline: bool = False,
         random_baseline_source_run: str | None = None,
+        embedding_prefilter_enabled: bool = False,
+        embedding_prefilter_top_k: int = 10,
+        embedding_is_judge: bool = False,
     ):
         super().__init__(client)
         self.bestofk_num_explanations: int = bestofk_num_explanations
@@ -64,6 +70,25 @@ class BestOfKExplainer(DefaultExplainer):
         """If True, load explanation from a different latent instead of generating."""
         self.random_baseline_source_run: str | None = random_baseline_source_run
         """Name of the run to load random baseline explanations from (under results/)."""
+        self.embedding_prefilter_enabled: bool = embedding_prefilter_enabled
+        self.embedding_prefilter_top_k: int = max(1, embedding_prefilter_top_k)
+        self.embedding_is_judge: bool = embedding_is_judge
+        self.embedding_scorer_index: int | None = self._find_embedding_scorer_index()
+
+        if self.embedding_prefilter_enabled and self.embedding_scorer_index is None:
+            print(
+                "[BestOfK] Embedding prefilter requested but no embedding scorer is configured; disabling prefilter."
+            )
+            self.embedding_prefilter_enabled = False
+
+        if self.embedding_is_judge and self.embedding_scorer_index is not None:
+            self.judge_scorer_index = self.embedding_scorer_index
+
+    def _find_embedding_scorer_index(self) -> int | None:
+        for idx, (scorer, _) in enumerate(self.scorers_with_paths):
+            if getattr(scorer, "name", "") == "embedding":
+                return idx
+        return None
 
     async def __call__(
         self, record: LatentRecord
@@ -233,8 +258,11 @@ class BestOfKExplainer(DefaultExplainer):
 
         # save the best score for all scorers
         for scorer_idx, (scorer, score_dir) in enumerate(self.scorers_with_paths):
+            best_score = scorer_results[best_explanation_idx][scorer_idx]
+            if best_score is None:
+                continue
             self.scorer_postprocess(
-                scorer_results[best_explanation_idx][scorer_idx],
+                best_score,
                 score_dir=score_dir,
                 is_final=True,
             )
@@ -250,60 +278,75 @@ class BestOfKExplainer(DefaultExplainer):
     ) -> list[list[ScorerResult]]:
         print(f"[BestOfK] run_scorers: Processing {len(explanations)} explanations")
         # if run_all_scorers is False, still returns a list of ScorerResults, just with one element.
-        wrapped_scorers = []
-        if self.run_all_scorers:
-            # print(
-            # f"[BestOfK] run_scorers: Running all {len(self.scorers_with_paths)} scorers"
-            # )
-            for scorer_with_path in self.scorers_with_paths:
-                scorer, score_dir = scorer_with_path
-                wrapped_scorer = process_wrapper(
-                    scorer,
-                    preprocess=self.scorer_preprocess,
-                    postprocess=partial(self.scorer_postprocess, score_dir=score_dir),
-                )
-                wrapped_scorers.append(wrapped_scorer)
-        else:
-            # print(
-            # f"[BestOfK] run_scorers: Running only judge scorer (index {self.judge_scorer_index})"
-            # )
-            scorer, score_dir = self.scorers_with_paths[self.judge_scorer_index]
-            wrapped_scorer = process_wrapper(
+        num_scorers = len(self.scorers_with_paths)
+        all_results: list[list[ScorerResult | None]] = [
+            [None] * num_scorers for _ in range(len(explanations))
+        ]
+        all_indices = list(range(len(explanations)))
+
+        def make_wrapper(scorer_idx: int):
+            scorer, score_dir = self.scorers_with_paths[scorer_idx]
+            return process_wrapper(
                 scorer,
                 preprocess=self.scorer_preprocess,
                 postprocess=partial(self.scorer_postprocess, score_dir=score_dir),
             )
-            wrapped_scorers.append(wrapped_scorer)
 
-        # print(f"[BestOfK] run_scorers: Created {len(wrapped_scorers)} wrapped scorers")
+        async def run_for_indices(
+            target_indices: list[int], scorer_indices: list[int]
+        ) -> None:
+            if not target_indices or not scorer_indices:
+                return
 
-        async def explanation_async_iter():
-            # print(
-            # f"[BestOfK] explanation_async_iter: Starting to yield {len(explanations)} explanations"
-            # )
-            for i, explanation in enumerate(explanations):
-                # print(
-                # f"[BestOfK] explanation_async_iter: Yielding explanation {i + 1}/{len(explanations)}"
-                # )
-                yield explanation
-            # print(
-            # "[BestOfK] explanation_async_iter: Finished yielding all explanations"
-            # )
-            # )
+            wrappers = [make_wrapper(idx) for idx in scorer_indices]
 
-        # print("[BestOfK] run_scorers: Creating pipeline")
-        pipeline = Pipeline(
-            explanation_async_iter(),
-            Pipe(*wrapped_scorers),
-        )
-        print("[BestOfK] run_scorers: Starting pipeline.run()")
-        result: list[list[ScorerResult]] = await pipeline.run()
-        print(
-            f"[BestOfK] run_scorers: Pipeline completed, returning {len(result)} results"
-        )
-        print(f"[BestOfK] run_scorers: result len: {len(result)}")
-        print(f"[BestOfK] run_scorers: result[0] len: {len(result[0])}")
-        return result  # outer index is explanation, inner index is scorer
+            async def generator():
+                for idx in target_indices:
+                    yield explanations[idx]
+
+            pipeline = Pipeline(
+                generator(),
+                Pipe(*wrappers),
+            )
+            subset_results: list[list[ScorerResult]] = await pipeline.run()
+            for pos, scorer_list in enumerate(subset_results):
+                exp_idx = target_indices[pos]
+                for local_idx, scorer_result in enumerate(scorer_list):
+                    global_idx = scorer_indices[local_idx]
+                    all_results[exp_idx][global_idx] = scorer_result
+
+        if self.embedding_prefilter_enabled and self.embedding_scorer_index is not None:
+            print(
+                "[BestOfK] Embedding prefilter enabled: running embedding scorer on all explanations"
+            )
+            await run_for_indices(all_indices, [self.embedding_scorer_index])
+
+            embedding_scores = [
+                self._score_judge_result(all_results[idx][self.embedding_scorer_index])
+                if all_results[idx][self.embedding_scorer_index] is not None
+                else float("-inf")
+                for idx in all_indices
+            ]
+            top_k = min(self.embedding_prefilter_top_k, len(explanations))
+            ranked = sorted(
+                all_indices, key=lambda i: embedding_scores[i], reverse=True
+            )
+            filtered_indices = ranked[:top_k]
+            other_scorer_indices = [
+                idx for idx in range(num_scorers) if idx != self.embedding_scorer_index
+            ]
+            print(
+                f"[BestOfK] Embedding prefilter selected top-{top_k} indices: {filtered_indices}"
+            )
+            await run_for_indices(filtered_indices, other_scorer_indices)
+        else:
+            if self.run_all_scorers:
+                scorer_indices = list(range(num_scorers))
+            else:
+                scorer_indices = [self.judge_scorer_index]
+            await run_for_indices(all_indices, scorer_indices)
+
+        return all_results  # outer index is explanation, inner index aligns with scorers
 
     def _compute_f1_score(self, results: list[ClassifierOutput]) -> float:
         # Score should be f1 score
@@ -333,16 +376,31 @@ class BestOfKExplainer(DefaultExplainer):
 
         return f1
 
+    def _compute_embedding_score(self, results: list[EmbeddingOutput]) -> float:
+        if not results:
+            return float("-inf")
+        pos = [sample.similarity for sample in results if sample.activating]
+        neg = [sample.similarity for sample in results if not sample.activating]
+        if not pos or not neg:
+            return float("-inf")
+        return fmean(pos) - fmean(neg)
+
+    def _score_judge_result(self, scorer_result: ScorerResult) -> float:
+        samples = scorer_result.score or []
+        if samples and isinstance(samples[0], EmbeddingOutput):
+            return self._compute_embedding_score(samples)
+        return self._compute_f1_score(samples)
+
     def _select_best_explanation_idx(
         self,
         scorer_results: list[ScorerResult],
         explainer_results: list[ExplainerResult],
     ) -> int:
-        f1_scores: list[float] = []
+        judge_scores: list[float] = []
         for score_result in scorer_results:
-            f1_score: float = self._compute_f1_score(score_result.score)
-            f1_scores.append(f1_score)
-        best_idx = max(range(len(f1_scores)), key=lambda i: f1_scores[i])
+            judge_score: float = self._score_judge_result(score_result)
+            judge_scores.append(judge_score)
+        best_idx = max(range(len(judge_scores)), key=lambda i: judge_scores[i])
 
         return best_idx
 

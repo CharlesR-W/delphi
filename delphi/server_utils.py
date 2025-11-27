@@ -9,6 +9,15 @@ import torch
 from delphi.config import RunConfig
 
 
+def _resolve_metrics_port(server_port: int | None, run_cfg: RunConfig) -> int | None:
+    """
+    Determine which metrics port to use for vLLM.
+    Only attach a metrics port if explicitly configured.
+    """
+    _ = server_port  # unused but kept for signature compatibility
+    return getattr(run_cfg, "server_metrics_port", None)
+
+
 def check_other_vllm_servers():
     """Check for other vLLM servers running and warn user"""
     try:
@@ -47,6 +56,8 @@ def start_server_if_not_running(server_port: int, run_cfg: RunConfig):
     # Check for other vLLM servers first
     check_other_vllm_servers()
 
+    metrics_port = _resolve_metrics_port(server_port, run_cfg)
+
     try:
         response = requests.get(f"http://localhost:{server_port}/v1/models")
         if response.status_code == 200:
@@ -82,6 +93,9 @@ def start_server_if_not_running(server_port: int, run_cfg: RunConfig):
             # "--disable-log-requests",
             # "--no-access-log",
         ]
+
+        if metrics_port is not None:
+            cmd.extend(["--metrics-port", str(metrics_port)])
 
         # Add boolean flags only if True (don't pass False values)
         if getattr(run_cfg, "enable_prefix_caching", True):
@@ -154,4 +168,50 @@ def start_server_if_not_running(server_port: int, run_cfg: RunConfig):
     )
     print("Server process successfully aborted")
     return server_process
+
+
+def report_vllm_gpu_utilization(run_cfg: RunConfig, context: str = "post-run") -> None:
+    """
+    Fetch and print the vLLM GPU utilization metric (max across GPUs) if available.
+    """
+    server_port = getattr(run_cfg, "server_port", None)
+    if server_port is None:
+        return  # Local/offline LLM without a persistent server; nothing to query.
+
+    metrics_port = _resolve_metrics_port(server_port, run_cfg)
+    if metrics_port is None:
+        return
+
+    try:
+        resp = requests.get(
+            f"http://localhost:{metrics_port}/metrics",
+            timeout=2,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as err:
+        print(
+            f"[server_utils] Unable to fetch vLLM metrics on port {metrics_port}: {err}"
+        )
+        return
+
+    gpu_utils: list[float] = []
+    for line in resp.text.splitlines():
+        if not line.startswith("vllm_gpu_utilization"):
+            continue
+        try:
+            value = float(line.rsplit(" ", 1)[-1])
+        except ValueError:
+            continue
+        gpu_utils.append(value)
+
+    if not gpu_utils:
+        print(
+            f"[server_utils] vLLM metrics endpoint responded but no gpu util entries were found (port {metrics_port})"
+        )
+        return
+
+    max_util_pct = max(gpu_utils) * 100
+    print(
+        f"[server_utils] vLLM GPU util ({context}): {max_util_pct:.1f}% (metrics port {metrics_port})"
+    )
 

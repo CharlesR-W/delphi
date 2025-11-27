@@ -5,13 +5,15 @@ import subprocess
 import time
 from pathlib import Path
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3,4"
+# Respect an existing CUDA device selection; default to GPUs 3 and 4 only if unset.
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3,4"
 from functools import partial
 from typing import Any, Callable, Tuple
 
 import orjson
-import requests
 import torch
+from sentence_transformers import SentenceTransformer
 from torch import Tensor
 from transformers import (
     AutoModel,
@@ -38,11 +40,17 @@ from delphi.latents import LatentCache, LatentDataset, LatentRecord
 from delphi.latents.neighbours import NeighbourCalculator
 from delphi.log.result_analysis import log_results
 from delphi.pipeline import Pipe, Pipeline, process_wrapper
-from delphi.scorers import DetectionScorer, FuzzingScorer, OpenAISimulator, Scorer
+from delphi.scorers import (
+    DetectionScorer,
+    EmbeddingScorer,
+    FuzzingScorer,
+    OpenAISimulator,
+    Scorer,
+)
 from delphi.scorers.scorer import ScorerResult
-from delphi.server_utils import check_other_vllm_servers, start_server_if_not_running
+from delphi.server_utils import report_vllm_gpu_utilization, start_server_if_not_running
 from delphi.sparse_coders import load_hooks_sparse_coders, load_sparse_coders
-from delphi.utils import assert_type, load_tokenized_data
+from delphi.utils import TimingAggregator, assert_type, load_tokenized_data
 
 
 def load_artifacts(run_cfg: RunConfig):
@@ -157,14 +165,41 @@ async def process_cache(
         tokenizer=tokenizer,
     )
 
-    if run_cfg.explainer_provider == "offline":
-        # Start server if server_port is specified
-        if run_cfg.server_port is not None:
-            print(
-                f"[run_experiment.py:run] Starting server on port {run_cfg.server_port} (unless already running, then will do nothing)"
-            )
-            start_server_if_not_running(run_cfg.server_port, run_cfg)
+    timing_aggregator = TimingAggregator()
+    scorer_dir_to_name: dict[str, str] = {}
 
+    def record_duration(bucket: str, name: str, value):
+        key = f"{bucket}:{name}"
+
+        def _record(entry):
+            if entry is None:
+                return
+            if isinstance(entry, (list, tuple)):
+                for item in entry:
+                    _record(item)
+            else:
+                timing_aggregator.add(key, getattr(entry, "duration", None))
+
+        _record(value)
+
+    def write_timing_summary():
+        log_dir = scores_path.parent / "log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        summary = timing_aggregator.as_dict()
+        payload: dict[str, dict[str, dict[str, float]]] = {"explainers": {}, "scorers": {}}
+        for key, stats in summary.items():
+            bucket, _, name = key.partition(":")
+            if bucket == "explainer":
+                payload["explainers"][name] = stats
+            elif bucket == "scorer":
+                payload["scorers"][name] = stats
+            else:
+                payload.setdefault("other", {})[name] = stats
+        timings_path = log_dir / "timings.json"
+        with open(timings_path, "wb") as f:
+            f.write(orjson.dumps(payload, option=orjson.OPT_INDENT_2))
+
+    if run_cfg.explainer_provider == "offline":
         llm_client = Offline(
             run_cfg.explainer_model,
             max_memory=0.9,
@@ -213,29 +248,26 @@ async def process_cache(
         round_idx: int
         | None = None,  # passed only for iterative, non-final result - iterative produces multiple scores,but only one at a time
     ):
-        def write_duration(base_path: Path, duration: float | None):
-            if duration is not None:
-                meta_path = base_path.with_name(base_path.stem + "_metadata.json")
-                with open(meta_path, "wb") as f:
-                    f.write(orjson.dumps({"duration": duration}))
+        dir_path = Path(score_dir)
+        dir_key = str(dir_path.resolve())
+        scorer_label = scorer_dir_to_name.get(dir_key, dir_path.name)
+
+        if not is_final:
+            record_duration("scorer", scorer_label, result)
 
         tmp = result if isinstance(result, list) else [result]
         safe_latent_name = str(tmp[0].record.latent).replace("/", "--")
 
         # For bestofk and iterative (per-round), save all scores to multi_scores folder
         if run_cfg.explainer == "bestofk" and not is_final:
-            # BestOfK: save all K candidate scores (analogous to iterative rounds)
-            # The explanation_id tells us which candidate this is
             explanation_id = getattr(tmp[0].record, "_explanation_id", 0)
             out_path = (
-                score_dir
+                dir_path
                 / "multi_scores"
                 / f"{safe_latent_name}_{explanation_id}.txt"
             )
             with open(out_path, "wb") as f:
                 f.write(orjson.dumps(result.score))
-            
-            write_duration(out_path, result.duration)
 
             if run_cfg.verbose:
                 print(
@@ -244,45 +276,38 @@ async def process_cache(
         elif run_cfg.explainer == "iterative":
             if is_final:
                 assert not isinstance(result, list)  # is_final mustnt give a list
-                # For the selected best explanation, also emit a top-level score file
-                out_path = score_dir / f"{safe_latent_name}.txt"
+                out_path = dir_path / f"{safe_latent_name}.txt"
                 with open(out_path, "wb") as f:
                     f.write(orjson.dumps(tmp[0].score))
-                
-                write_duration(out_path, tmp[0].duration)
 
                 if run_cfg.verbose:
                     print(
                         f"[scorer_postprocess] Wrote iterative FINAL score: {out_path}"
                     )
-            else:  # iterative, not final, multiple results - set up to write either a single result or a list; idk which it returns
+            else:
                 if isinstance(result, list):
                     for round_idx, res in enumerate(result):
                         out_path = (
-                            score_dir
+                            dir_path
                             / "multi_scores"
                             / f"{safe_latent_name}_{round_idx}.txt"
                         )
                         with open(out_path, "wb") as f:
                             f.write(orjson.dumps(res.score))
-                        
-                        write_duration(out_path, res.duration)
 
                         if run_cfg.verbose:
                             print(
                                 f"[scorer_postprocess] Wrote iterative multi-score: {out_path}"
                             )
-                else:  # iterative, not final, single result
+                else:
                     assert round_idx is not None
                     out_path = (
-                        score_dir
+                        dir_path
                         / "multi_scores"
                         / f"{safe_latent_name}_{round_idx}.txt"
                     )
                     with open(out_path, "wb") as f:
                         f.write(orjson.dumps(result.score))
-                    
-                    write_duration(out_path, result.duration)
 
                     if run_cfg.verbose:
                         print(
@@ -290,11 +315,9 @@ async def process_cache(
                         )
         else:  # not bestofk or iterative
             assert not isinstance(result, list)
-            out_path = score_dir / f"{safe_latent_name}.txt"
+            out_path = dir_path / f"{safe_latent_name}.txt"
             with open(out_path, "wb") as f:
                 f.write(orjson.dumps(result.score))
-            
-            write_duration(out_path, result.duration)
 
             if run_cfg.verbose:
                 print(f"[scorer_postprocess] Wrote score: {out_path}")
@@ -302,17 +325,21 @@ async def process_cache(
         # for bestofk, return the first (or list) for upstream use; others ignore
         return result if run_cfg.explainer == "bestofk" else None
 
+
+
     wrapped_scorers: list[
         Any
     ] = []  # contains wrapped scorers; most pipelines will use this
     scorers_with_paths: list[
         tuple[Scorer, Path]
     ] = []  # contains scorers and their paths, for bestofk
+    embedding_model = None
     for scorer_name in run_cfg.scorers:
         scorer_path = scores_path / scorer_name
         scorer_path.mkdir(parents=True, exist_ok=True)
         # For multi-explainer modes (e.g., bestofk), ensure subdir exists
         (scorer_path / "multi_scores").mkdir(parents=True, exist_ok=True)
+        scorer_dir_to_name[str(scorer_path.resolve())] = scorer_name
         if run_cfg.verbose:
             print(
                 f"[process_cache] Scorer '{scorer_name}' outputs under: {scorer_path}"
@@ -340,6 +367,13 @@ async def process_cache(
                 n_examples_shown=run_cfg.num_examples_per_scorer_prompt,
                 verbose=run_cfg.verbose,
                 log_prob=run_cfg.log_probs,
+            )
+        elif scorer_name == "embedding":
+            if embedding_model is None:
+                embedding_model = SentenceTransformer(run_cfg.embedding_model)
+            scorer = EmbeddingScorer(
+                embedding_model,
+                verbose=run_cfg.verbose,
             )
         else:
             raise ValueError(f"Scorer {scorer_name} not supported")
@@ -373,11 +407,6 @@ async def process_cache(
                 )
                 with open(path, "wb") as f:
                     f.write(orjson.dumps(explainer_result.explanation))
-                
-                if explainer_result.duration is not None:
-                    meta_path = path.with_name(path.stem + "_metadata.json")
-                    with open(meta_path, "wb") as f:
-                        f.write(orjson.dumps({"duration": explainer_result.duration}))
 
                 if run_cfg.verbose:
                     print(f"[explainer_postprocess] Wrote explanation: {path}")
@@ -397,6 +426,7 @@ async def process_cache(
                         explainer_result, filename, subdir="multi_explanations"
                     )
 
+                record_duration("explainer", run_cfg.explainer, explainer_result)
                 return explainer_results
             else:
                 explainer_result, all_explanations = explainer_results
@@ -409,6 +439,7 @@ async def process_cache(
                 # Save the selected explanation as the final one
                 filename = f"{explainer_result.record.latent}.txt"
                 write_explanation(explainer_result, filename)
+                record_duration("explainer", run_cfg.explainer, [explainer_result, *all_explanations])
                 return explainer_results
 
         if run_cfg.constructor_cfg.non_activating_source == "FAISS":
@@ -426,13 +457,18 @@ async def process_cache(
                 scorer_postprocess=scorer_postprocess,
                 scorer_preprocess=scorer_preprocess,
                 temperature=run_cfg.explainer_temperature,
-                judge_scorer_index=run_cfg.judge_scorer_index,
+                judge_scorer_index=getattr(
+                    run_cfg, "bestofk_judge_scorer_index", run_cfg.judge_scorer_index
+                ),
                 return_only_best=run_cfg.bestofk_return_only_best,
                 run_all_scorers=run_cfg.bestofk_run_all_scorers,
                 is_multishot=run_cfg.bestofk_is_multishot,
                 bestofk_num_train_examples=run_cfg.bestofk_num_train_examples,
                 use_random_baseline=run_cfg.use_random_baseline,
                 random_baseline_source_run=run_cfg.random_baseline_source_run,
+                embedding_prefilter_enabled=run_cfg.bestofk_embedding_prefilter_enabled,
+                embedding_prefilter_top_k=run_cfg.bestofk_embedding_prefilter_top_k,
+                embedding_is_judge=run_cfg.bestofk_embedding_use_as_judge,
             )
             # Spot check logging disabled for performance
             # setattr(explainer, "spot_check_dir", (scores_path.parent / "spot_check").resolve())
@@ -550,6 +586,7 @@ async def process_cache(
             f"[process_cache] Starting pipeline with concurrency={run_cfg.pipeline_num_proc}"
         )
     await pipeline.run(run_cfg.pipeline_num_proc)
+    write_timing_summary()
     if run_cfg.verbose:
         print("[process_cache] Pipeline completed")
 
@@ -657,6 +694,15 @@ async def run(
 
     run_cfg.save_json(base_path / "run_config.json", indent=4)
 
+    if (
+        run_cfg.explainer_provider == "offline"
+        and run_cfg.server_port is not None
+    ):
+        print(
+            f"[run_experiment.py:run] Ensuring vLLM server is running on port {run_cfg.server_port} before preprocessing"
+        )
+        start_server_if_not_running(run_cfg.server_port, run_cfg)
+
     latents_path = base_path / "latents"
     explanations_path = base_path / "explanations"
     scores_path = base_path / "scores"
@@ -718,6 +764,8 @@ async def run(
             tokenizer,
             latent_range,
         )
+
+    report_vllm_gpu_utilization(run_cfg)
 
     if run_cfg.verbose:
         log_results(
@@ -811,7 +859,7 @@ def default_run_config() -> RunConfig:
         explainer_provider="offline",
         server_port=8000,  # if set, assumes local server is running.  'None' will start server
         explainer="iterative",
-        scorers=["fuzz", "detection"],
+        scorers=["fuzz", "detection", "embedding"],
         name="pythia-160m-iterative-100-latents",
         max_latents=100,
         filter_bos=True,
@@ -829,7 +877,7 @@ def default_run_config() -> RunConfig:
         # iterative only
         iterative_num_rounds=5,
         #iterative_holdout_ratio_of_total=0.1,
-        iterative_test_ratio_of_nonholdout=0.75,
+        #iterative_test_ratio_of_nonholdout=0.75,
         iterative_max_num_false_positives=10,
         iterative_max_num_false_negatives=10,
         iterative_append_round_to_prompt=True,

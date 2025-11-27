@@ -2,6 +2,7 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import fmean
 from typing import Callable, Literal, Optional, TypeVar
 
 import torch
@@ -15,6 +16,7 @@ from delphi.latents import (
 )
 from delphi.scorers.classifier.classifier import Classifier
 from delphi.scorers.classifier.sample import ClassifierOutput
+from delphi.scorers.embedding.embedding import EmbeddingOutput
 from delphi.scorers.scorer import ScorerResult
 
 from ..default.prompt_builder import build_prompt as default_prompt
@@ -346,9 +348,28 @@ class HillClimbing:
             return 0.0
         return 2 * precision * recall / (precision + recall)
 
+    def _compute_embedding_score(self, results: list[EmbeddingOutput]) -> float:
+        if not results:
+            return float("-inf")
+        pos = [sample.similarity for sample in results if sample.activating]
+        neg = [sample.similarity for sample in results if not sample.activating]
+        if not pos or not neg:
+            return float("-inf")
+        return fmean(pos) - fmean(neg)
+
+    def _score_judge_result(self, results: list) -> float:
+        if results and isinstance(results[0], EmbeddingOutput):
+            return self._compute_embedding_score(results)
+        return self._compute_f1_score(results)
+
     def _get_wrong_examples(self, results: list[ScorerResult]) -> list[Example]:
         wrong_examples = []
         for result in results:
+            if not result.score:
+                continue
+            first_sample = result.score[0]
+            if not hasattr(first_sample, "correct"):
+                continue
             for i, sample in enumerate(result.score):
                 if not sample.correct:
                     # Create a extra example
@@ -571,7 +592,7 @@ class HillClimbing:
         end_time = time.time()
 
         # print("----- Holdout score ------")
-        judge_holdout_f1_score = self._compute_f1_score(
+        judge_holdout_f1_score = self._score_judge_result(
             holdout_scorer_results[self.judge_scorer_index].score
         )
         print(
@@ -648,12 +669,12 @@ class HillClimbing:
         ]
 
         # Find best round based on judge scorer F1
-        f1_scores: list[float] = []
+        judge_scores: list[float] = []
         for score_result in judge_holdout_results:
-            f1_score: float = self._compute_f1_score(score_result.score)
-            f1_scores.append(f1_score)
+            score_value: float = self._score_judge_result(score_result.score)
+            judge_scores.append(score_value)
 
-        best_round_idx = max(range(len(f1_scores)), key=lambda i: f1_scores[i])
+        best_round_idx = max(range(len(judge_scores)), key=lambda i: judge_scores[i])
 
         # Write final scores for ALL scorers from the best round
         for scorer_idx, (_, score_dir) in enumerate(self.scorers_with_paths):
@@ -737,7 +758,7 @@ class HillClimbing:
             all_holdout_scorer_results.append(round_holdout_scorer_results)
             all_test_scorer_results.append(round_test_scorer_results)
             previous_test_f1_scores.append(
-                self._compute_f1_score(
+                self._score_judge_result(
                     round_test_scorer_results[self.judge_scorer_index].score
                 )
             )
@@ -746,7 +767,7 @@ class HillClimbing:
             carry_strategy = getattr(self, "iterative_carryforward_strategy", "last")
             if carry_strategy == "best" and len(explanations) > 0:
                 scores = [
-                    self._compute_f1_score(r[self.judge_scorer_index].score)
+                    self._score_judge_result(r[self.judge_scorer_index].score)
                     for r in all_test_scorer_results
                 ]
                 best_idx = max(range(len(scores)), key=lambda i: scores[i])
