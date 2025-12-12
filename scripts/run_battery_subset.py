@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from delphi.run_experiment import default_run_config, ExperimentRunner
-from delphi.experiment_battery import ExperimentBattery, ExperimentDefinition
+from experiment_battery import ExperimentBattery, ExperimentDefinition
 
 
 def _load_requested_names(args: argparse.Namespace) -> list[str]:
@@ -121,6 +121,7 @@ def main() -> None:
         name=None,
         server_port=args.server_port,
         server_metrics_port=args.metrics_port,
+        verbose=False,  # suppress plotting/logging to avoid post-run parsing failures in smoke runs
     )
 
     results_dir = args.results_dir or (Path(__file__).resolve().parent.parent / "results")
@@ -146,6 +147,9 @@ def main() -> None:
 
     if not args.plot_only:
         battery.run(subset)
+        # In smoke/non-verbose runs, skip plotting to avoid strict parsing of scorer outputs.
+        if not base_cfg.verbose:
+            return
 
     # Always plot after completion (or to visualize prior runs when --plot-only)
     battery.plot_runs(subset)

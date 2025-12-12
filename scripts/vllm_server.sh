@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Explicitly set compilers to use user's Conda environment to avoid system dependency issues
+export CC=/home/charles/miniconda3/bin/x86_64-conda-linux-gnu-gcc
+export CXX=/home/charles/miniconda3/bin/x86_64-conda-linux-gnu-g++
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PID_DIR="/tmp"
@@ -41,6 +45,22 @@ require_arg() {
 }
 
 start_server() {
+    # Resolve Python: env override > local venv > conda env > uv > PATH
+    local python_cmd="${VLLM_PYTHON:-}"
+    if [[ -z "$python_cmd" ]]; then
+        if [[ -x "$REPO_ROOT/.venv/bin/python" ]]; then
+            python_cmd="$REPO_ROOT/.venv/bin/python"
+        elif [[ -x "$HOME/miniconda3/envs/iterative/bin/python" ]]; then
+            python_cmd="$HOME/miniconda3/envs/iterative/bin/python"
+        elif command -v conda >/dev/null 2>&1; then
+            python_cmd="conda run -n iterative python"
+        elif command -v uv >/dev/null 2>&1; then
+            python_cmd="uv run python"
+        else
+            python_cmd="python"
+        fi
+    fi
+
     local port=""
     local gpus=""
     local model="Qwen/Qwen3-32B"
@@ -78,6 +98,15 @@ start_server() {
         tensor_parallel="${#gpu_array[@]}"
     fi
 
+    # If caller did not supply a served-model-name, default it to the model tag
+    # so the exposed name matches what clients request.
+    local add_served_name=true
+    for arg in "${extra_args[@]}"; do
+        if [[ "${arg}" == "--served-model-name" ]]; then
+            add_served_name=false
+        fi
+    done
+
     local pid_file="${PID_DIR}/vllm_${port}.pid"
     if [[ -f "${pid_file}" ]]; then
         echo "PID file ${pid_file} already exists. Stop the server first or remove the PID file." >&2
@@ -88,7 +117,8 @@ start_server() {
     echo "Starting vLLM on port ${port} (GPUs ${gpus})..."
     echo "Logs: ${log_file}"
 
-    local cmd=(vllm serve "${model}"
+    local cmd=("$python_cmd" -m vllm.entrypoints.openai.api_server
+        --model "${model}"
         --host 0.0.0.0
         --port "${port}"
         --max-model-len "${max_len}"
@@ -104,6 +134,9 @@ start_server() {
     fi
     if [[ "${enforce_eager}" == "true" ]]; then
         cmd+=(--enforce-eager)
+    fi
+    if [[ "${add_served_name}" == "true" ]]; then
+        cmd+=(--served-model-name "${model}")
     fi
     if [[ ${#extra_args[@]} -gt 0 ]]; then
         cmd+=("${extra_args[@]}")
