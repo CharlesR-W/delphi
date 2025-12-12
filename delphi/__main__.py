@@ -242,7 +242,7 @@ async def process_cache(
         out_path = score_dir / f"{safe_latent_name}.txt"
 
         with open(out_path, "wb") as f:
-            f.write(orjson.dumps(result.score))
+            f.write(orjson.dumps(result.score, option=orjson.OPT_SERIALIZE_DATACLASS))
         
         if result.duration is not None:
             meta_path = out_path.with_name(out_path.stem + "_metadata.json")

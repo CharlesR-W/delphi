@@ -29,7 +29,7 @@ from delphi.log.result_analysis import (
 )
 
 if __package__ is None or __package__ == "":
-    from run_experiment import ExperimentRunner, default_run_config
+    from delphi.run_experiment import ExperimentRunner, default_run_config
 else:  # pragma: no cover
     from .run_experiment import ExperimentRunner, default_run_config
 
@@ -1239,9 +1239,9 @@ if __name__ == "__main__":
 
     # --- Commands (uncommented to run) ---
     # Run Best-of-K experiments
-    print("Running Best-of-K experiments...")
-    if not PLOT_ONLY:
-        battery.run(bestofk_experiments)
+    # print("Running Best-of-K experiments...")
+    # if not PLOT_ONLY:
+    #     battery.run(bestofk_experiments)
 
     # Plot Best-of-K runs (final results)
     print("Plotting Best-of-K runs (final results)...")
@@ -1253,14 +1253,15 @@ if __name__ == "__main__":
 
     # Run Random baseline experiments (requires source runs to exist)
     if random_baseline_experiments:
-        print("Running Random Baseline experiments...")
-        if not PLOT_ONLY:
-            battery.run(random_baseline_experiments)
+        # print("Running Random Baseline experiments...")
+        # if not PLOT_ONLY:
+        #     battery.run(random_baseline_experiments)
+        pass
 
     # Run Iterative experiments
-    print("Running Iterative experiments...")
-    if not PLOT_ONLY:
-        battery.run(iterative_experiments)
+    # print("Running Iterative experiments...")
+    # if not PLOT_ONLY:
+    #     battery.run(iterative_experiments)
 
     # Plot Iterative runs (final results)
     print("Plotting Iterative runs (final results)...")

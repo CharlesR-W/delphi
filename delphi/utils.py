@@ -45,7 +45,6 @@ def load_tokenized_data(
         max_seq_len=ctx_len,
         text_key=column_name,
     )
-
     tokens = tokens_ds["input_ids"]
 
     try:

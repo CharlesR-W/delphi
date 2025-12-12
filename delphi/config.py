@@ -129,7 +129,7 @@ class RunConfig(Serializable):
     """list of model hookpoints to attach sparse models to."""
 
     explainer_model: str = field(
-        default="hugging-quants/Meta-Llama-3.1-70B-Instruct-AWQ-INT4",
+        default="Qwen/Qwen3-32B",
     )
     """Name of the model to use for explanation and scoring."""
 
@@ -169,7 +169,7 @@ class RunConfig(Serializable):
     'simulation'."""
 
     embedding_model: str = field(
-        default="sentence-transformers/all-MiniLM-L6-v2",
+        default="mathreader/stella_en_400M_v5_finetuned_embedding_scorer",
     )
     """SentenceTransformer model name/path to use for the embedding scorer."""
 
@@ -197,7 +197,7 @@ class RunConfig(Serializable):
     """Huggingface API token for downloading models."""
 
     pipeline_num_proc: int = field(
-        default_factory=lambda: cpu_count() // 2,
+        default=6,
     )
     """Number of processes to use for preprocessing data"""
 
@@ -248,6 +248,9 @@ class RunConfig(Serializable):
 
     enforce_eager: bool = field(default=False)
     """Enforce eager execution in vLLM server (disables CUDA graphs)."""
+
+    cuda_visible_devices: str | None = field(default=None)
+    """Optional CUDA device list to pin a vLLM server, e.g. '0' or '0,1'."""
 
     use_random_baseline: bool = field(default=False)
     """If True, Best-of-K/Iterative will load explanations from a prior run at random."""

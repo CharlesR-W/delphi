@@ -116,10 +116,15 @@ def start_server_if_not_running(server_port: int, run_cfg: RunConfig):
             "VLLM_CONFIGURE_LOGGING", "1"
         )
 
+        env = os.environ.copy()
+        if getattr(run_cfg, "cuda_visible_devices", None):
+            env["CUDA_VISIBLE_DEVICES"] = str(run_cfg.cuda_visible_devices)
+
         server_process = subprocess.Popen(
             cmd,
             # Don't redirect stdout/stderr initially - let server logs show
             start_new_session=True,
+            env=env,
         )
         # server_process is the process - return so we can shut down later
     with open(f"/tmp/vllm_{run_cfg.server_port}.pid", "w") as f:

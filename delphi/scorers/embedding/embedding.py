@@ -42,6 +42,7 @@ class EmbeddingScorer(Scorer):
         self.model = model
         self.verbose = verbose
         self.generation_kwargs = generation_kwargs
+        self._embedding_cache = {}  # Cache for sample embeddings
 
     async def __call__(
         self,
@@ -89,15 +90,29 @@ class EmbeddingScorer(Scorer):
         explanation_prompt = explanation_string + explanation
         samples_text = [sample.text for sample in samples]
 
-        query_embeding = self.model.encode(explanation_prompt)
-        samples_text = [sample.text for sample in samples]
+        # Create cache key from sample texts
+        cache_key = tuple(samples_text)
+        
+        # Check cache for sample embeddings (these stay the same across calls)
+        if cache_key in self._embedding_cache:
+            sample_embedings = self._embedding_cache[cache_key]
+            if self.verbose:
+                print(f"[EmbeddingScorer] Cache HIT: Reusing embeddings for {len(samples_text)} samples")
+        else:
+            sample_embedings = self.model.encode(samples_text)
+            self._embedding_cache[cache_key] = sample_embedings
+            if self.verbose:
+                print(f"[EmbeddingScorer] Cache MISS: Encoded {len(samples_text)} samples, cache size now {len(self._embedding_cache)}")
 
-        sample_embedings = self.model.encode(samples_text)
+        # Always encode explanation fresh (it changes each time)
+        query_embeding = self.model.encode(explanation_prompt)
+        
         similarity = self.model.similarity(query_embeding, sample_embedings)[0]
 
         results = []
         for i in range(len(samples)):
             samples[i].data.similarity = similarity[i].item()
+            # User explicitly requested using raw similarity only
             results.append(samples[i].data)
         return results
 

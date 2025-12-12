@@ -95,7 +95,8 @@ run_group() {
         fi
     fi
     
-    nohup $python_cmd "$SCRIPT_DIR/run_battery_subset.py" \
+    # Disable tqdm progress bars to avoid log pollution
+    TQDM_DISABLE=1 nohup $python_cmd "$SCRIPT_DIR/run_battery_subset.py" \
         --server-port "$port" \
         --experiments "${experiments[@]}" \
         "${CMD_ARGS[@]}" \

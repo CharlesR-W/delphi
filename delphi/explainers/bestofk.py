@@ -286,11 +286,15 @@ class BestOfKExplainer(DefaultExplainer):
 
         def make_wrapper(scorer_idx: int):
             scorer, score_dir = self.scorers_with_paths[scorer_idx]
-            return process_wrapper(
+            scorer_name = getattr(scorer, 'name', f'scorer_{scorer_idx}')
+            print(f"[BestOfK make_wrapper] Creating wrapper for scorer {scorer_idx} ({scorer_name})")
+            wrapper = process_wrapper(
                 scorer,
                 preprocess=self.scorer_preprocess,
                 postprocess=partial(self.scorer_postprocess, score_dir=score_dir),
             )
+            print(f"[BestOfK make_wrapper] Wrapper created for scorer {scorer_idx}, type: {type(wrapper)}")
+            return wrapper
 
         async def run_for_indices(
             target_indices: list[int], scorer_indices: list[int]
@@ -298,17 +302,23 @@ class BestOfKExplainer(DefaultExplainer):
             if not target_indices or not scorer_indices:
                 return
 
+            print(f"[BestOfK run_for_indices] Creating wrappers for scorer indices: {scorer_indices}")
             wrappers = [make_wrapper(idx) for idx in scorer_indices]
+            print(f"[BestOfK run_for_indices] Created {len(wrappers)} wrappers")
 
             async def generator():
                 for idx in target_indices:
                     yield explanations[idx]
 
+            print(f"[BestOfK run_for_indices] Creating Pipeline with {len(wrappers)} scorers for {len(target_indices)} explanations")
             pipeline = Pipeline(
                 generator(),
                 Pipe(*wrappers),
             )
+            # print(f"[BestOfK] Running pipeline with {len(wrappers)} scorers for {len(target_indices)} explanations")
             subset_results: list[list[ScorerResult]] = await pipeline.run()
+            print(f"[BestOfK run_for_indices] Pipeline completed, got {len(subset_results)} results")
+            # print(f"[BestOfK] Pipeline returned {len(subset_results)} results")
             for pos, scorer_list in enumerate(subset_results):
                 exp_idx = target_indices[pos]
                 for local_idx, scorer_result in enumerate(scorer_list):
@@ -328,6 +338,8 @@ class BestOfKExplainer(DefaultExplainer):
                 for idx in all_indices
             ]
             top_k = min(self.embedding_prefilter_top_k, len(explanations))
+            
+            # Sort indices by score (raw similarity from embedding scorer)
             ranked = sorted(
                 all_indices, key=lambda i: embedding_scores[i], reverse=True
             )
@@ -344,6 +356,11 @@ class BestOfKExplainer(DefaultExplainer):
                 scorer_indices = list(range(num_scorers))
             else:
                 scorer_indices = [self.judge_scorer_index]
+            print(f"[BestOfK] run_all_scorers={self.run_all_scorers}, running scorer indices: {scorer_indices}, total scorers: {num_scorers}")
+            for idx in scorer_indices:
+                scorer, score_dir = self.scorers_with_paths[idx]
+                scorer_name = getattr(scorer, 'name', f'scorer_{idx}')
+                print(f"[BestOfK]   - Scorer {idx}: {scorer_name} at {score_dir}")
             await run_for_indices(all_indices, scorer_indices)
 
         return all_results  # outer index is explanation, inner index aligns with scorers

@@ -90,7 +90,11 @@ def plot_accuracy_hist(df: pd.DataFrame, out_dir: Path, image_format: str = "pdf
         fig, ax = plt.subplots(figsize=(10, 6))
         # Use 10 bins linearly spaced between 0 and 1
         bins = np.linspace(0, 1, 11)  # 11 edges = 10 bins
-        ax.hist(subset["accuracy"], bins=bins, alpha=0.7, edgecolor="black")
+        
+        # Ensure accuracy values are a numpy array of floats, handling potentially empty or object-typed series
+        acc_values = subset["accuracy"].values.astype(float)
+        
+        ax.hist(acc_values, bins=bins, alpha=0.7, edgecolor="black")
         ax.set_xlabel("Accuracy")
         ax.set_ylabel("Count")
         ax.set_title(
@@ -237,13 +241,13 @@ def load_data(scores_path: Path, modules: list[str]):
         return pd.DataFrame(
             [
                 {
-                    "text": "".join(ex["str_tokens"]),
-                    "distance": ex["distance"],
-                    "activating": ex["activating"],
-                    "prediction": ex["prediction"],
-                    "probability": ex["probability"],
-                    "correct": ex["correct"],
-                    "activations": ex["activations"],
+                    "text": "".join(ex.get("str_tokens", [])),
+                    "distance": ex.get("distance"),
+                    "activating": ex.get("activating"),
+                    "prediction": ex.get("prediction"),
+                    "probability": ex.get("probability"),
+                    "correct": ex.get("correct"),
+                    "activations": ex.get("activations"),
                     "latent_idx": latent_idx,
                 }
                 for ex in data

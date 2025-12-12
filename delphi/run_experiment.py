@@ -247,82 +247,93 @@ async def process_cache(
         round_idx: int
         | None = None,  # passed only for iterative, non-final result - iterative produces multiple scores,but only one at a time
     ):
-        dir_path = Path(score_dir)
-        dir_key = str(dir_path.resolve())
-        scorer_label = scorer_dir_to_name.get(dir_key, dir_path.name)
+        try:
+            dir_path = Path(score_dir)
+            dir_key = str(dir_path.resolve())
+            scorer_label = scorer_dir_to_name.get(dir_key, dir_path.name)
 
-        if not is_final:
-            record_duration("scorer", scorer_label, result)
+            print(f"[scorer_postprocess DEBUG] Called for scorer '{scorer_label}', explainer={run_cfg.explainer}, is_final={is_final}, result type={type(result)}")
 
-        tmp = result if isinstance(result, list) else [result]
-        safe_latent_name = str(tmp[0].record.latent).replace("/", "--")
+            if not is_final:
+                record_duration("scorer", scorer_label, result)
 
-        # For bestofk and iterative (per-round), save all scores to multi_scores folder
-        if run_cfg.explainer == "bestofk" and not is_final:
-            explanation_id = getattr(tmp[0].record, "_explanation_id", 0)
-            out_path = (
-                dir_path
-                / "multi_scores"
-                / f"{safe_latent_name}_{explanation_id}.txt"
-            )
-            with open(out_path, "wb") as f:
-                f.write(orjson.dumps(result.score))
+            # Result should always be a single ScorerResult (lists are handled separately below for iterative)
+            safe_latent_name = str(result.record.latent).replace("/", "--")
 
-            if run_cfg.verbose:
-                print(
-                    f"[scorer_postprocess] Wrote BestOfK candidate score {explanation_id}: {out_path}"
+            # For bestofk and iterative (per-round), save all scores to multi_scores folder
+            if run_cfg.explainer == "bestofk" and not is_final:
+                explanation_id = getattr(result.record, "_explanation_id", 0)
+                out_path = (
+                    dir_path
+                    / "multi_scores"
+                    / f"{safe_latent_name}_{explanation_id}.txt"
                 )
-        elif run_cfg.explainer == "iterative":
-            if is_final:
-                assert not isinstance(result, list)  # is_final mustnt give a list
-                out_path = dir_path / f"{safe_latent_name}.txt"
+                print(f"[scorer_postprocess DEBUG] Writing to {out_path}, score type: {type(result.score)}, len: {len(result.score) if result.score else 0}")
                 with open(out_path, "wb") as f:
-                    f.write(orjson.dumps(tmp[0].score))
+                    f.write(orjson.dumps(result.score, option=orjson.OPT_SERIALIZE_DATACLASS))
+                print(f"[scorer_postprocess DEBUG] Successfully wrote file {out_path}")
 
                 if run_cfg.verbose:
                     print(
-                        f"[scorer_postprocess] Wrote iterative FINAL score: {out_path}"
+                        f"[scorer_postprocess] Wrote BestOfK candidate score {explanation_id}: {out_path}"
                     )
-            else:
-                if isinstance(result, list):
-                    for round_idx, res in enumerate(result):
+            elif run_cfg.explainer == "iterative":
+                if is_final:
+                    assert not isinstance(result, list)  # is_final mustnt give a list
+                    out_path = dir_path / f"{safe_latent_name}.txt"
+                    with open(out_path, "wb") as f:
+                        f.write(orjson.dumps(result.score, option=orjson.OPT_SERIALIZE_DATACLASS))
+
+                    if run_cfg.verbose:
+                        print(
+                            f"[scorer_postprocess] Wrote iterative FINAL score: {out_path}"
+                        )
+                else:
+                    if isinstance(result, list):
+                        for round_idx, res in enumerate(result):
+                            out_path = (
+                                dir_path
+                                / "multi_scores"
+                                / f"{safe_latent_name}_{round_idx}.txt"
+                            )
+                            with open(out_path, "wb") as f:
+                                f.write(orjson.dumps(res.score, option=orjson.OPT_SERIALIZE_DATACLASS))
+
+                            if run_cfg.verbose:
+                                print(
+                                    f"[scorer_postprocess] Wrote iterative multi-score: {out_path}"
+                                )
+                    else:
+                        assert round_idx is not None
                         out_path = (
                             dir_path
                             / "multi_scores"
                             / f"{safe_latent_name}_{round_idx}.txt"
                         )
                         with open(out_path, "wb") as f:
-                            f.write(orjson.dumps(res.score))
+                            f.write(orjson.dumps(result.score, option=orjson.OPT_SERIALIZE_DATACLASS))
 
                         if run_cfg.verbose:
                             print(
                                 f"[scorer_postprocess] Wrote iterative multi-score: {out_path}"
                             )
-                else:
-                    assert round_idx is not None
-                    out_path = (
-                        dir_path
-                        / "multi_scores"
-                        / f"{safe_latent_name}_{round_idx}.txt"
-                    )
-                    with open(out_path, "wb") as f:
-                        f.write(orjson.dumps(result.score))
+            else:  # not bestofk or iterative
+                assert not isinstance(result, list)
+                out_path = dir_path / f"{safe_latent_name}.txt"
+                with open(out_path, "wb") as f:
+                    f.write(orjson.dumps(result.score, option=orjson.OPT_SERIALIZE_DATACLASS))
 
-                    if run_cfg.verbose:
-                        print(
-                            f"[scorer_postprocess] Wrote iterative multi-score: {out_path}"
-                        )
-        else:  # not bestofk or iterative
-            assert not isinstance(result, list)
-            out_path = dir_path / f"{safe_latent_name}.txt"
-            with open(out_path, "wb") as f:
-                f.write(orjson.dumps(result.score))
+                if run_cfg.verbose:
+                    print(f"[scorer_postprocess] Wrote score: {out_path}")
 
-            if run_cfg.verbose:
-                print(f"[scorer_postprocess] Wrote score: {out_path}")
-
-        # for bestofk, return the first (or list) for upstream use; others ignore
-        return result if run_cfg.explainer == "bestofk" else None
+            # for bestofk, return the first (or list) for upstream use; others ignore
+            return result if run_cfg.explainer == "bestofk" else None
+        except Exception as e:
+            print(f"[scorer_postprocess ERROR] Exception in scorer_postprocess: {type(e).__name__}: {e}")
+            print(f"[scorer_postprocess ERROR] result type: {type(result)}, score_dir: {score_dir}")
+            import traceback
+            traceback.print_exc()
+            raise
 
 
 
@@ -392,15 +403,19 @@ async def process_cache(
         else:
             raise ValueError(f"Scorer {scorer_name} not supported")
 
+        print(f"[process_cache DEBUG] Wrapping scorer '{scorer_name}' with postprocess callback")
+        print(f"[process_cache DEBUG] Scorer object type: {type(scorer)}, hasattr(__call__): {hasattr(scorer, '__call__')}")
         wrapped_scorer = process_wrapper(
             scorer,
             preprocess=scorer_preprocess,
             postprocess=partial(scorer_postprocess, score_dir=scorer_path),
         )
+        print(f"[process_cache DEBUG] Wrapped scorer type: {type(wrapped_scorer)}, callable: {callable(wrapped_scorer)}")
         scorers_with_paths.append(
             (scorer, scorer_path)
         )  # for bestofk, this is used to run the scorers
         wrapped_scorers.append(wrapped_scorer)
+        print(f"[process_cache DEBUG] Added scorer '{scorer_name}' to scorers_with_paths (total: {len(scorers_with_paths)})")
 
     if not run_cfg.explainer == "none":
 

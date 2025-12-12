@@ -27,20 +27,23 @@ def process_wrapper(
 
     @wraps(function)
     async def wrapped(input: Any):
-        # print(f"[process_wrapper] Starting {function.__name__}")
+        fname = getattr(function, '__name__', str(type(function).__name__))
+        # print(f"[process_wrapper] Starting {fname}")
         if preprocess is not None:
-            # print(f"[process_wrapper] Applying preprocess to {function.__name__}")
+            # print(f"[process_wrapper] Applying preprocess to {fname}")
             input = preprocess(input)
 
-        # print(f"[process_wrapper] Calling {function.__name__}")
+        # print(f"[process_wrapper] Calling {fname}")
         results = await function(input)
-        # print(f"[process_wrapper] {function.__name__} completed")
+        # print(f"[process_wrapper] {fname} completed with result type: {type(results)}")
 
         if postprocess is not None:
-            # print(f"[process_wrapper] Applying postprocess to {function.__name__}")
+            print(f"[process_wrapper DEBUG] About to call postprocess for {fname}, result type: {type(results)}")
+            # print(f"[process_wrapper] Applying postprocess to {fname}")
             results = postprocess(results)
+            print(f"[process_wrapper DEBUG] Postprocess completed for {fname}")
 
-        # print(f"[process_wrapper] {function.__name__} finished")
+        # print(f"[process_wrapper] {fname} finished")
         return results
 
     return wrapped
@@ -70,9 +73,14 @@ class Pipe:
         Returns:
             list[Any]: The results of all functions.
         """
+        print(f"[Pipe DEBUG] Running {len(self.functions)} functions in parallel")
         tasks = [function(input) for function in self.functions]
 
-        return await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks)
+        print(f"[Pipe DEBUG] Gathered {len(results)} results from {len(self.functions)} functions")
+        for i, result in enumerate(results):
+            print(f"[Pipe DEBUG]   Result {i}: type={type(result)}, value={result if not hasattr(result, 'score') else f'ScorerResult(score_len={len(result.score) if result.score else 0})'}")
+        return results
 
 
 class Pipeline:
@@ -133,6 +141,7 @@ class Pipeline:
             results.extend(task.result() for task in done)
 
         progress_bar.close()
+        # print(f"[Pipeline] Completed: processed {number_of_items} items, returning {len(results)} results")
         return results
 
     async def generate_items(self) -> AsyncIterable[Any]:
